@@ -1,961 +1,751 @@
-import { useState } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, ReferenceArea } from "recharts";
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  CRYOWATCH  ·  Cold-chain monitoring for commercial refrigeration
-//  Visual language: the Coors Light "cold-activated" can — brushed aluminum,
-//  Rocky Mountain ridges that frost over icy blue, alpine night sky.
+//  CRYOWATCH · neon shell + Cryo, the AI tech assistant
+//  Home (Morning Briefing + store wall) → Store → Rack → Case · plus RTUs
+//  Cryo: ask-anything assistant (reads live data, deep-links) + proactive briefing
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Arctic palette ────────────────────────────────────────────────────────────
-const C = {
-  // deep cold backgrounds
-  abyss:    "#07131F",
-  deep:     "#0C1E2E",
-  steel:    "#112739",
-  steel2:   "#173247",
-  raised:   "#1C3C53",
-  line:     "#1F3E55",
-  lineLt:   "#2D5876",
-  // cold-activated blues (the mountain blue)
-  ice:      "#5CC8F2",
-  iceBright:"#92DCF8",
-  glacier:  "#1FA3DC",
-  deepIce:  "#0C6FA6",
-  // brushed metal
-  aluminum: "#C2CACF",
-  chrome:   "#EAF0F4",
-  pewter:   "#7E8C97",
-  // frost whites
-  frost:    "#EAF5FC",
-  snow:     "#F7FCFE",
-  // accent — Coors banner red, used sparingly
-  red:      "#D11F33",
-  // text / status
-  txt:      "#E7F1F8",
-  dim:      "#6E8394",
-  green:    "#3FD68A",
-  amber:    "#F2B33D",
-  orange:   "#F2843D",
-  crit:     "#FF5C6C",
-  purple:   "#A78BFA",
-  teal:     "#2DD4BF",
+const P = {
+  bg0:"#080611", bg1:"#0C0A1A", panel:"#141029", panel2:"#191338",
+  line:"#2A2150", lineLt:"#3C2F70",
+  blue:"#3B82F6", cyan:"#38BDF8", sky:"#5B9DF9",
+  violet:"#8B5CF6", purple:"#A855F7", magenta:"#E83FB0", pink:"#F472D0",
+  txt:"#ECE8FB", frost:"#F6F3FF", dim:"#8B83B0", pewter:"#6F6796",
+  green:"#34D399", amber:"#FBBF24", orange:"#FB923C", crit:"#FB5773",
 };
+const F=`'Oswald','Segoe UI',sans-serif`, FB=`'Inter','Segoe UI',sans-serif`, FM=`'Space Mono',ui-monospace,monospace`;
+const DAY=86400000, STEP=30*60000, R=14, RB=10;
+const sCol = s => ({ ok:P.green, warn:P.amber, crit:P.crit }[s] || P.dim);
+const PCATS = [["belts","Belts"],["filters","Filters"],["fans","Fans"],["motors","Motors"],["coils","Coils"]];
 
-const STORE_COLORS = [
-  { main:"#5CC8F2", dim:"#0C3A52" },
-  { main:"#2DD4BF", dim:"#0B463E" },
-  { main:"#F2B33D", dim:"#4A3510" },
-  { main:"#A78BFA", dim:"#33245A" },
-  { main:"#3FD68A", dim:"#0E4329" },
-  { main:"#F2843D", dim:"#4A2710" },
+const rng = s => () => { s|=0; s=s+0x6D2B79F5|0; let t=Math.imul(s^s>>>15,1|s); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; };
+function genHistory(target,{ seed=1, turnDaysAgo=0, riseDays=3, peakDelta=0, fixDaysAgo=0 }={}) {
+  const r=rng(seed), now=Date.now(), start=now-30*DAY, out=[]; const turnAt=now-turnDaysAgo*DAY, fixAt=now-fixDaysAgo*DAY;
+  for(let t=start;t<=now;t+=STEP){ let v=target+(r()-0.5)*1.6; if(Math.floor((t-start)/STEP)%12===0) v+=5.5;
+    if(peakDelta&&t>=turnAt&&t<fixAt){ const ramp=Math.min(1,(t-turnAt)/(riseDays*DAY)); v+=peakDelta*ramp; }
+    out.push({ t, temp:+v.toFixed(1) }); }
+  return out;
+}
+
+// ── demo data ──────────────────────────────────────────────────────────────────
+const TECHS_0 = [
+  { id:"jm", name:"Jesse Mosko", role:"Lead Refrigeration Tech", email:"jesse@coldchain.io", initials:"JM", tint:P.cyan },
+  { id:"dr", name:"Dana Reyes",  role:"Service Technician",      email:"dana@coldchain.io",  initials:"DR", tint:P.violet },
+  { id:"tb", name:"Tom Becker",  role:"Overnight Monitoring",    email:"tom@coldchain.io",   initials:"TB", tint:P.magenta },
 ];
+const C = (id,name,sys,target,status,cur,opts,extra={}) => ({ id,name,sys,target,band:6,status,cur,opts,kind:"circuit",
+  model:"AK-CC55-018x", serial:"3915G-0"+id.replace(/\D/g,"").padStart(3,"0"), refrig:"R-448A", location:name, pmDate:"2026-04-10",
+  parts:{ fans:[{spec:"Evap fan 12in ECM",qty:2}] }, summary:"No open issues.", remark:"Stable.", photos:[], ...extra });
 
-const NOTE_TYPES = [
-  { id:"emergency",  label:"Emergency Fix",       color:C.crit,   icon:"🚨" },
-  { id:"pm",         label:"Preventive Maint.",   color:C.teal,   icon:"🔧" },
-  { id:"rack",       label:"Rack Issue",          color:C.orange, icon:"⚙" },
-  { id:"defrost",    label:"Defrost Adj.",        color:C.ice,    icon:"❄" },
-  { id:"sensor",     label:"Sensor / Wiring",     color:C.purple, icon:"📡" },
-  { id:"door",       label:"Door / Gasket",       color:C.amber,  icon:"🚪" },
-  { id:"ambient",    label:"Ambient / HVAC",      color:"#9FD8C4",icon:"🌡" },
-  { id:"humidity",   label:"Humidity Issue",      color:C.iceBright,icon:"💧" },
-  { id:"resolved",   label:"Resolved / Verified", color:C.green,  icon:"✓" },
-  { id:"observation",label:"Observation",         color:C.dim,    icon:"👁" },
+const STORES_0 = [
+  { id:89, number:"#0089", name:"Riverside", address:"123 Riverside Ave, Broomfield CO", phone:"(303) 555-0189", overnight:1,
+    racks:[
+      { id:"A", name:"Rack A · Low Temp", comps:[{n:1,on:true},{n:2,on:true},{n:3,on:true}], systems:["Frozen","Ice Cream"], suction:"16 psi", condenser:"90°",
+        cases:[ C("A01","Frozen Food","1",-5,"ok",-3,{seed:5}), C("A02","Ice Cream","2",-10,"ok",-8,{seed:9}) ] },
+      { id:"B", name:"Rack B · Med Temp", comps:[{n:1,on:true},{n:2,on:true},{n:3,on:false}], systems:["Dairy","Produce / Deli"], suction:"45 psi", condenser:"92°",
+        cases:[
+          C("B01","Dairy","1",34,"ok",35,{seed:3}),
+          C("B02","Produce Coffin","2",36,"ok",37,{seed:7,turnDaysAgo:15,riseDays:3,peakDelta:14,fixDaysAgo:12},{ color:P.magenta,
+            summary:"Ran poor due to evap fan — fan changed 6/4/26, good since.",
+            remark:"Temps climbed ~14°F over 3 days starting ~6/1 before the swap. Classic failing evap-fan signature.",
+            parts:{ fans:[{spec:"Evap fan 12in ECM",qty:2}], coils:[{spec:"Evap coil 6-row",qty:1}] },
+            photos:[{cap:"Iced coil",who:"JM",date:"6/1"},{cap:"Failed fan",who:"JM",date:"6/4"},{cap:"New fan in",who:"JM",date:"6/4"}] }),
+          C("B03","Deli Service","2",33,"ok",33,{seed:11}),
+          C("B12","Seafood SS","2",26,"crit",38,{seed:23,turnDaysAgo:2,riseDays:2,peakDelta:12,fixDaysAgo:0},{ color:P.crit,
+            summary:"Alarming since ~00:30 — climbing.", remark:"Rapid rise overnight while rack B comp 3 is down. Likely capacity loss on the med-temp rack — check comp 3 before chasing the case." }),
+        ] },
+    ],
+    rtus:[
+      { id:"RTU-1", kind:"rtu", name:"RTU-1 · Front Entrance", type:"Carrier 48TC", model:"48TCED12", serial:"4817C-221", location:"Roof NW", status:"ok", note:"", photos:[],
+        parts:{ belts:[{spec:"BX-48 V-belt",qty:2}], filters:[{spec:"20x25x2 pleated",qty:4}], motors:[{spec:"Cond fan motor 1HP",qty:1}] } },
+      { id:"RTU-2", kind:"rtu", name:"RTU-2 · Bakery", type:"Trane Voyager", model:"YHC060", serial:"TRN-552", location:"Roof SE", status:"warn", note:"Belt squeal reported AM.", photos:[],
+        parts:{ belts:[{spec:"AX-42 V-belt",qty:1}], filters:[{spec:"16x20x2 pleated",qty:6}] } },
+    ] },
+  { id:116, number:"#0116", name:"Oakridge", address:"44 Oakridge Rd, Westminster CO", phone:"(303) 555-0116", overnight:0,
+    racks:[ { id:"A", name:"Rack A · Med Temp", comps:[{n:1,on:true},{n:2,on:true}], systems:["Dairy","Produce"], suction:"44 psi", condenser:"89°",
+      cases:[ C("A01","Dairy","1",34,"ok",34,{seed:31}), C("A02","Produce","2",36,"ok",36,{seed:33}) ] } ],
+    rtus:[ { id:"RTU-1", kind:"rtu", name:"RTU-1 · Sales Floor", type:"Carrier 48TC", model:"48TCED08", serial:"4817C-330", location:"Roof", status:"ok", note:"", photos:[], parts:{ belts:[{spec:"BX-42 V-belt",qty:1}], filters:[{spec:"20x20x2",qty:4}] } } ] },
+  { id:204, number:"#0204", name:"Pinewood", address:"9 Pinewood Blvd, Erie CO", phone:"(720) 555-0204", overnight:0,
+    racks:[ { id:"A", name:"Rack A · Med Temp", comps:[{n:1,on:true},{n:2,on:true}], systems:["Meat","Deli"], suction:"46 psi", condenser:"91°",
+      cases:[ C("A01","Meat Case","1",30,"warn",36,{seed:41,turnDaysAgo:5,riseDays:4,peakDelta:7,fixDaysAgo:0},{ summary:"Drifting up — watch.", remark:"Slow climb over 4 days; possible early door-gasket or coil-ice. Not alarming yet." }) ] } ],
+    rtus:[] },
 ];
-
-const URGENCY = {
-  Today:        { color:C.crit,   bg:"#2A0E14", border:"#5A1A26", label:"TODAY" },
-  "This Week":  { color:C.orange, bg:"#2A1A0A", border:"#5A3414", label:"THIS WEEK" },
-  "Watch List": { color:C.ice,    bg:"#0A2433", border:"#13486A", label:"WATCH" },
-  Resolved:     { color:C.green,  bg:"#0A2A1C", border:"#145A3A", label:"RESOLVED" },
-};
-
-const TYPE_ICON  = { Alarm:"⚠", Trending:"↗", Defrost:"❄", Compressor:"⚙" };
-const TYPE_COLOR = { Alarm:C.crit, Trending:C.orange, Defrost:C.ice, Compressor:C.purple };
-
-// ── Login profiles ─────────────────────────────────────────────────────────────
-const TECHS = [
-  { id:"jm",    name:"Jesse Mosko",  role:"Lead Refrigeration Tech", region:"Front Range",      initials:"JM", tint:C.ice },
-  { id:"dr",    name:"Dana Reyes",   role:"Service Technician",      region:"Denver Metro",     initials:"DR", tint:C.teal },
-  { id:"tb",    name:"Tom Becker",   role:"Overnight Monitoring",    region:"Boulder · North",  initials:"TB", tint:C.iceBright },
-  { id:"guest", name:"Demo Access",  role:"Read-only walkthrough",   region:"All stores",       initials:"··", tint:C.aluminum, demo:true },
+const ALARMS_0 = [
+  { id:1, storeId:89,  rackId:"B", caseId:"B12", store:"Riverside", text:"B12 Seafood SS — high temp, 12° over setpoint.", time:"00:34", sev:"crit", state:"active",  ack:false },
+  { id:2, storeId:204, rackId:"A", caseId:"A01", store:"Pinewood",  text:"A01 Meat Case — trending above target.",       time:"03:10", sev:"warn", state:"active",  ack:false },
+  { id:3, storeId:89,  rackId:"A", caseId:"A02", store:"Riverside", text:"A02 Ice Cream — high temp during defrost.",     time:"02:05", sev:"ok",   state:"cleared", ack:false },
+  { id:4, storeId:116, rackId:"A", caseId:"A02", store:"Oakridge",  text:"A02 Produce — brief high temp, recovered.",     time:"23:48", sev:"ok",   state:"cleared", ack:true  },
 ];
-
-// ── Store 89 circuits ───────────────────────────────────────────────────────────
-const S89_CIRCUITS = [
-  { id:"1A",  name:"1A GFBX 1-1",    system:"1", type:"Freezer",      area:"Back Room",    setpointLow:-5,  setpointHigh:12, currentTemp:3,   defrostOk:true,  status:"ok"   },
-  { id:"1B",  name:"1B RIFF 1-2",    system:"1", type:"Glass Door",   area:"Aisle 17",     setpointLow:-5,  setpointHigh:10, currentTemp:4,   defrostOk:true,  status:"ok"   },
-  { id:"1C",  name:"1C CFN-BK4 1-3", system:"1", type:"Bunker",       area:"Bakery",       setpointLow:10,  setpointHigh:20, currentTemp:16,  defrostOk:true,  status:"warn" },
-  { id:"1D",  name:"1D CFN-MT4 1-4", system:"1", type:"Bunker",       area:"Meat Right",   setpointLow:28,  setpointHigh:38, currentTemp:32,  defrostOk:true,  status:"ok"   },
-  { id:"1E",  name:"1E RIIC 1-5",    system:"1", type:"Glass Door",   area:"Aisle 17",     setpointLow:-10, setpointHigh:0,  currentTemp:-3,  defrostOk:true,  status:"ok"   },
-  { id:"1F",  name:"1F RIIC 1-6",    system:"1", type:"Glass Door",   area:"Aisle 17",     setpointLow:-10, setpointHigh:2,  currentTemp:-4,  defrostOk:true,  status:"ok"   },
-  { id:"1FA", name:"1FA RIIC 1-7",   system:"1", type:"End Cap",      area:"Aisle 17",     setpointLow:-14, setpointHigh:2,  currentTemp:-2,  defrostOk:true,  status:"ok"   },
-  { id:"2A",  name:"2A BFBX 1-1",    system:"2", type:"Freezer",      area:"Bakery Back",  setpointLow:-5,  setpointHigh:12, currentTemp:6,   defrostOk:false, status:"warn" },
-  { id:"2B",  name:"2B RIFF 1-2",    system:"2", type:"Glass Door",   area:"Aisle 17",     setpointLow:-5,  setpointHigh:10, currentTemp:5,   defrostOk:true,  status:"ok"   },
-  { id:"2Ba", name:"2Ba RIFF 1-3",   system:"2", type:"End Cap",      area:"Aisle 17",     setpointLow:-6,  setpointHigh:12, currentTemp:-1,  defrostOk:true,  status:"ok"   },
-  { id:"2C",  name:"2C RIFF 1-4",    system:"2", type:"Glass Door",   area:"Aisle 16",     setpointLow:-5,  setpointHigh:10, currentTemp:7,   defrostOk:true,  status:"ok"   },
-  { id:"2D",  name:"2D RIFF 1-5",    system:"2", type:"Glass Door",   area:"Aisle 16",     setpointLow:-5,  setpointHigh:12, currentTemp:8,   defrostOk:true,  status:"ok"   },
-  { id:"2E",  name:"2E RIFF 1-6",    system:"2", type:"Glass Door",   area:"Aisle 16",     setpointLow:-5,  setpointHigh:10, currentTemp:0,   defrostOk:true,  status:"ok"   },
-  { id:"2Ea", name:"2Ea RIFF 1-7",   system:"2", type:"End Cap",      area:"Aisle 16",     setpointLow:29,  setpointHigh:42, currentTemp:33,  defrostOk:true,  status:"warn" },
-  { id:"2F",  name:"2F RIFF 1-8",    system:"2", type:"Glass Door",   area:"Meat Right",   setpointLow:-5,  setpointHigh:12, currentTemp:5,   defrostOk:true,  status:"ok"   },
-  { id:"2G",  name:"2G DFBX 1-9",    system:"2", type:"Freezer",      area:"Deli",         setpointLow:-5,  setpointHigh:12, currentTemp:5,   defrostOk:false, status:"warn" },
-  { id:"2H",  name:"2H RIFF 1-10",   system:"2", type:"Glass Door",   area:"Aisle 16",     setpointLow:-5,  setpointHigh:10, currentTemp:4,   defrostOk:true,  status:"ok"   },
-  { id:"2I",  name:"2I FZCAKE4 1-8", system:"2", type:"Glass Door",   area:"Bakery",       setpointLow:-5,  setpointHigh:12, currentTemp:3,   defrostOk:true,  status:"ok"   },
-  { id:"3A",  name:"3A SDMT 1-1",    system:"3", type:"Low Profile",  area:"Meat Middle",  setpointLow:22,  setpointHigh:43, currentTemp:34,  defrostOk:true,  status:"ok"   },
-  { id:"3B",  name:"3B SDMT 1-2",    system:"3", type:"Low Profile",  area:"Meat Middle",  setpointLow:22,  setpointHigh:43, currentTemp:36,  defrostOk:true,  status:"ok"   },
-  { id:"3C",  name:"3C SDMT 1-3",    system:"3", type:"Low Profile",  area:"Meat Middle",  setpointLow:22,  setpointHigh:43, currentTemp:33,  defrostOk:true,  status:"ok"   },
-  { id:"3D",  name:"3D SDMT 1-4",    system:"3", type:"Low Profile",  area:"Meat Middle",  setpointLow:22,  setpointHigh:43, currentTemp:39,  defrostOk:false, status:"warn" },
-  { id:"3E",  name:"3E SVDL 1-5",    system:"3", type:"Service Case", area:"Deli",         setpointLow:28,  setpointHigh:41, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"3F",  name:"3F SVMT 1-6",    system:"3", type:"Service Case", area:"Meat Front",   setpointLow:22,  setpointHigh:43, currentTemp:40,  defrostOk:true,  status:"ok"   },
-  { id:"3G",  name:"3G SVFH 1-7",    system:"3", type:"Service Case", area:"Meat Front",   setpointLow:22,  setpointHigh:42, currentTemp:33,  defrostOk:true,  status:"ok"   },
-  { id:"3H",  name:"3H MDFH 1-8",    system:"3", type:"Low Profile",  area:"Seafood",      setpointLow:22,  setpointHigh:43, currentTemp:37,  defrostOk:true,  status:"ok"   },
-  { id:"3J",  name:"3J MDDL 1-9",    system:"3", type:"Multi Deck",   area:"Deli",         setpointLow:28,  setpointHigh:48, currentTemp:38,  defrostOk:true,  status:"ok"   },
-  { id:"3K",  name:"3K DLBX 1-10",   system:"3", type:"Cooler",       area:"Deli",         setpointLow:28,  setpointHigh:41, currentTemp:36,  defrostOk:true,  status:"ok"   },
-  { id:"3L",  name:"3L MTPR 1-11",   system:"3", type:"Cooler",       area:"Meat Left",    setpointLow:46,  setpointHigh:55, currentTemp:52,  defrostOk:true,  status:"ok"   },
-  { id:"3M",  name:"3M MTBX 1-12",   system:"3", type:"Cooler",       area:"Meat Left",    setpointLow:22,  setpointHigh:43, currentTemp:38,  defrostOk:false, status:"warn" },
-  { id:"3N",  name:"3N P-BOX 1-13",  system:"3", type:"Cooler",       area:"Produce Back", setpointLow:31,  setpointHigh:43, currentTemp:37,  defrostOk:true,  status:"ok"   },
-  { id:"4A",  name:"4A MDDY 1-18a",  system:"4", type:"Island",       area:"Dairy",        setpointLow:28,  setpointHigh:43, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"4B",  name:"4B SUSHI 1-19",  system:"4", type:"Over/Under",   area:"Deli",         setpointLow:28,  setpointHigh:43, currentTemp:36,  defrostOk:true,  status:"ok"   },
-  { id:"4C",  name:"4C P-SLD 1-3",   system:"4", type:"Multi Deck",   area:"Produce",      setpointLow:28,  setpointHigh:43, currentTemp:39,  defrostOk:true,  status:"ok"   },
-  { id:"4D",  name:"4D FLWI 1-4",    system:"4", type:"Cooler",       area:"Floral",       setpointLow:34,  setpointHigh:48, currentTemp:37,  defrostOk:true,  status:"ok"   },
-  { id:"4G",  name:"4G P-WET 1-8",   system:"4", type:"Green Rack",   area:"Produce",      setpointLow:32,  setpointHigh:50, currentTemp:39,  defrostOk:true,  status:"ok"   },
-  { id:"4J",  name:"4J PKDL 1-10",   system:"4", type:"Multi Deck",   area:"Meat Front",   setpointLow:22,  setpointHigh:50, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"4K",  name:"4K DYWI 1-11",   system:"4", type:"Cooler",       area:"Dairy Middle", setpointLow:28,  setpointHigh:43, currentTemp:36,  defrostOk:true,  status:"ok"   },
-  { id:"4L",  name:"4L MDDY 1-12",   system:"4", type:"Multi Deck",   area:"Dairy Left",   setpointLow:28,  setpointHigh:43, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"4M",  name:"4M MDDY 1-13",   system:"4", type:"Multi Deck",   area:"Dairy Right",  setpointLow:28,  setpointHigh:43, currentTemp:33,  defrostOk:true,  status:"ok"   },
-  { id:"4N",  name:"4N JUICE 1-14",  system:"4", type:"Multi Deck",   area:"Dairy/Aisle",  setpointLow:28,  setpointHigh:43, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"4S",  name:"4S BEER 1-20a",  system:"4", type:"Glass Door",   area:"Aisle 20",     setpointLow:28,  setpointHigh:43, currentTemp:35,  defrostOk:true,  status:"ok"   },
-  { id:"4T",  name:"4T BEER 1-21a",  system:"4", type:"Glass Door",   area:"Aisle 20",     setpointLow:28,  setpointHigh:43, currentTemp:38,  defrostOk:true,  status:"warn" },
-  { id:"SC04",name:"SC04 CLKLST FZR",system:"SC",type:"Freezer SC",   area:"Back Room",    setpointLow:-5,  setpointHigh:12, currentTemp:6,   defrostOk:false, status:"warn" },
-  { id:"SC11",name:"SC11 BKRY CAKE", system:"SC",type:"Refrigerator", area:"Bakery",       setpointLow:23,  setpointHigh:30, currentTemp:29,  defrostOk:false, status:"crit" },
-  { id:"SC13",name:"SC13 BKRY RETRD",system:"SC",type:"Refrigerator", area:"Bakery",       setpointLow:28,  setpointHigh:42, currentTemp:40,  defrostOk:false, status:"warn" },
-  { id:"SC27",name:"SC27 STARBUCKS",  system:"SC",type:"Refrigerator", area:"Coffee Shop",  setpointLow:28,  setpointHigh:43, currentTemp:40,  defrostOk:false, status:"warn" },
-  { id:"SC22",name:"SC22 BERRY CASE", system:"SC",type:"Self Cont",   area:"Produce",      setpointLow:28,  setpointHigh:43, currentTemp:38,  defrostOk:false, status:"warn" },
+const MSGS_0 = [
+  { id:1, who:"Dana R.", storeId:89,  text:"On-call: acknowledged B12 at Riverside, comp 3 looks down on rack B. Someone grab it AM.", time:"02:14", ack:false },
+  { id:2, who:"Tom B.",  storeId:116, text:"Swapped contactor on Oakridge RTU-1, back online. Old part's in the rack room.", time:"03:40", ack:false },
 ];
-
-const DEFAULT_STORES = [
-  { id:89, name:"Store #89", location:"Division 620", brand:"Danfoss", refrigerant:"R-404A",
-    controllers:[{id:"ak800",name:"AK-800A",role:"System Controller"},{id:"akcc",name:"AK-CC 550",role:"Case Controllers"}],
-    circuits:S89_CIRCUITS, note:"KS89611 · 7-day temp log loaded" },
-  { id:1, name:"Store #1", location:"Main St",   brand:"CPC", refrigerant:"R-404A",
-    controllers:[{id:"c1",name:"E2 #1 — Rack",role:"Compressor Rack"},{id:"c2",name:"E2 #2 — MT",role:"Medium-Temp"},{id:"c3",name:"E2 #3 — LT",role:"Low-Temp"}],
-    circuits:[], note:"" },
-  { id:2, name:"Store #2", location:"Oak Ave",   brand:"", refrigerant:"", controllers:[], circuits:[], note:"" },
-  { id:3, name:"Store #3", location:"River Rd",  brand:"", refrigerant:"", controllers:[], circuits:[], note:"" },
-  { id:4, name:"Store #4", location:"Pine Blvd", brand:"", refrigerant:"", controllers:[], circuits:[], note:"" },
-  { id:5, name:"Store #5", location:"Cedar Ln",  brand:"", refrigerant:"", controllers:[], circuits:[], note:"" },
+const TRUCK_0 = [
+  { id:1, part:"20x25x2 pleated filter", qty:12 }, { id:2, part:"BX-48 V-belt", qty:3 },
+  { id:3, part:"Evap fan 12in ECM", qty:2 }, { id:4, part:"Contactor 40A 2-pole", qty:4 },
+  { id:5, part:"R-448A (25 lb)", qty:1 },
 ];
+const RANGES = { Day:1, Week:7, Month:30 };
+const SUGGEST = ["What's my priority today?","Why might compressor 3 be down?","What's wrong with B12?","What parts for B12?"];
 
-// ── Seed issues ─────────────────────────────────────────────────────────────────
-let nextIssueId = 10;
-const SEED_ISSUES = [
-  { id:1, storeId:89, type:"Defrost",  urgency:"Today",      controllerName:"AK-CC 550", circuit:"SC11 BKRY CAKE FRIDG",   description:"SC11 running chronically in alarm zone (25-30°F). Defrost not terminating on temp — time-outs every cycle. Possible heater failure or sensor fault.", riskScore:9, createdAt:"2025-06-10", notes:"", autoLogged:true, overnight:true },
-  { id:2, storeId:89, type:"Defrost",  urgency:"Today",      controllerName:"AK-CC 550", circuit:"2G DFBX 1-9",            description:"Defrost pattern shows inconsistent pull-down all week. 6/10 defrost ran long. Inspect heaters.", riskScore:7, createdAt:"2025-06-10", notes:"", autoLogged:true, overnight:true },
-  { id:3, storeId:89, type:"Trending", urgency:"This Week",  controllerName:"AK-800A",   circuit:"2Ea RIFF 1-7",           description:"Baseline temp climbing from 32°F (6/05) to 34°F (6/11). Slow upward trend — monitor for coil ice or door seal issue.", riskScore:5, createdAt:"2025-06-09", notes:"", autoLogged:true, overnight:false },
-  { id:4, storeId:89, type:"Defrost",  urgency:"This Week",  controllerName:"AK-CC 550", circuit:"2A BFBX 1-1",            description:"2A defrost peaks inconsistent. Some defrosts reaching 37°F, others 15°F. Possible heater cycling issue.", riskScore:6, createdAt:"2025-06-09", notes:"", autoLogged:true, overnight:true },
-  { id:5, storeId:89, type:"Trending", urgency:"Watch List", controllerName:"AK-CC 550", circuit:"4T BEER 1-21a",           description:"Beer case temps running 41-43°F consistently above 41°F setpoint. Intermittent warm spikes. Monitor door seals.", riskScore:4, createdAt:"2025-06-08", notes:"", autoLogged:true, overnight:false },
-];
+// ── Cryo's brain: reads live state, answers in plain English, can deep-link ─────────
+function brain(qRaw, stores, alarms, msgs){
+  const q=(qRaw||"").toLowerCase();
+  const bad=[]; stores.forEach(s=>(s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.status!=="ok") bad.push({s,r,c}); })));
+  bad.sort((a,b)=>(a.c.status==="crit"?0:1)-(b.c.status==="crit"?0:1));
+  const node=x=>({screen:"case",storeId:x.s.id,rackId:x.r.id,caseId:x.c.id});
 
-// ── Seed circuit notes ────────────────────────────────────────────────────────────
-let nextNoteId = 100;
-const SEED_CIRCUIT_NOTES = [
-  { id:1, storeId:89, circuitId:"SC11", type:"observation", text:"Cake fridge running 25-37°F all day — oscillating widely between low alarm and mid-range. Defrost only gets to 30°F max before timing out. Heater element suspect.", tech:"Auto-AI", date:"2025-06-10", time:"06:00", shift:"AM" },
-  { id:2, storeId:89, circuitId:"2G",   type:"observation", text:"Deli freezer pull-down after defrost taking 45+ min to recover to 5°F. Defrost heater may be partially failed or fan cycling off too soon.", tech:"Auto-AI", date:"2025-06-10", time:"06:00", shift:"AM" },
-  { id:3, storeId:89, circuitId:"2A",   type:"observation", text:"Bakery freezer defrost peaks erratic — 15°F one cycle, 37°F next. Pattern suggests one of two heater banks is not firing consistently.", tech:"Auto-AI", date:"2025-06-09", time:"06:00", shift:"AM" },
-  { id:4, storeId:89, circuitId:"SC27", type:"humidity",   text:"Starbucks fridge SC27 showing rapid cycling — 34°F to 50°F swings on every compressor cycle. Door seal or fan shroud suspected. High ambient near coffee station.", tech:"Auto-AI", date:"2025-06-10", time:"06:00", shift:"AM" },
-];
-
-// ── Pattern detection engine ─────────────────────────────────────────────────────
-function detectPatterns(circuitNotes, storeId) {
-  const storeNotes = circuitNotes.filter(n => n.storeId === storeId);
-  const patterns = [];
-  const humidityNotes = storeNotes.filter(n => n.type === "humidity");
-  if (humidityNotes.length >= 2) {
-    const circuits = [...new Set(humidityNotes.map(n => n.circuitId))];
-    patterns.push({ type:"humidity", severity:"warn", title:"Humidity Pattern Detected", body:`${circuits.length} circuits showing humidity-related issues (${circuits.join(", ")}). Check ambient conditions and door gaskets in affected zones.`, circuits, icon:"💧" });
+  const idm=q.match(/\b([a-z]\d{1,2}[a-z]?)\b/);
+  if(idm){ const id=idm[1]; let f=null;
+    stores.forEach(s=>(s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.id.toLowerCase()===id) f={s,r,c}; })));
+    if(f){
+      if(q.includes("part")){ const p=f.c.parts||{}; const lines=PCATS.map(([k,L])=>(p[k]&&p[k].length)?`${L}: ${p[k].map(x=>`${x.qty}× ${x.spec}`).join(", ")}`:null).filter(Boolean);
+        return { text:`${f.c.id} ${f.c.name} — parts on file:\n${lines.length?lines.join("\n"):"none logged yet."}`, action:{label:`Open ${f.c.id}`, node:node(f)} }; }
+      return { text:`${f.c.id} ${f.c.name} at ${f.s.name} is ${f.c.status.toUpperCase()} — ${f.c.cur}° vs ${f.c.target}° target.\n\nLikely cause: ${f.c.remark}`, action:{label:`Open ${f.c.id}`, node:node(f)} };
+    }
   }
-  const ambientNotes = storeNotes.filter(n => n.type === "ambient");
-  if (ambientNotes.length >= 1) {
-    patterns.push({ type:"ambient", severity:"warn", title:"Ambient Temp Concern", body:"One or more circuits flagged ambient/HVAC involvement. High store temp can cascade to multiple cases simultaneously.", circuits: ambientNotes.map(n=>n.circuitId), icon:"🌡" });
+  if(q.includes("priorit")||q.includes("run order")||q.includes("first")||q.includes("today")||q.includes("what should")||q.includes("worst")){
+    if(!bad.length) return { text:"You're clear — every case across your stores is in range. Quiet morning." };
+    const lines=bad.map((x,i)=>`${i+1}. ${x.c.id} ${x.c.name} — ${x.s.name} · Rack ${x.r.id} (${x.c.cur}°, ${x.c.status})`);
+    return { text:`Run order, worst first:\n${lines.join("\n")}\n\nStart with ${bad[0].c.id}: ${bad[0].c.remark}`, action:{label:`Open ${bad[0].c.id}`, node:node(bad[0])} };
   }
-  const defrostNotes = storeNotes.filter(n => n.type === "defrost" || n.type === "observation").filter(n => n.text.toLowerCase().includes("defrost"));
-  if (defrostNotes.length >= 3) {
-    const circuits = [...new Set(defrostNotes.map(n => n.circuitId))];
-    patterns.push({ type:"defrost-cluster", severity:"crit", title:"Multiple Defrost Failures", body:`${circuits.length} circuits with defrost anomalies (${circuits.join(", ")}). Check rack defrost schedule overlap, AK-800A defrost outputs, and shared heater circuits.`, circuits, icon:"❄" });
+  if(q.includes("overnight")||q.includes("chang")||q.includes("away")||q.includes("night")){
+    const act=alarms.filter(a=>a.state==="active");
+    return { text:`Overnight: ${act.length} active alarm(s), ${alarms.filter(a=>a.state==="cleared").length} cleared, ${msgs.length} tech hand-off(s).\n${act.map(a=>`• ${a.store}: ${a.text}`).join("\n")}` };
   }
-  const rackNotes = storeNotes.filter(n => n.type === "rack");
-  if (rackNotes.length >= 1) {
-    patterns.push({ type:"rack", severity:"crit", title:"Rack-Level Issue Noted", body:"Rack or compressor-level issue logged. Verify suction pressure, discharge pressure, and all circuits on this system.", circuits: rackNotes.map(n=>n.circuitId), icon:"⚙" });
-  }
-  return patterns;
+  const st=stores.find(s=>q.includes(s.name.toLowerCase()));
+  if(st){ const b=bad.filter(x=>x.s.id===st.id);
+    return { text:`${st.name}: ${b.length?b.map(x=>`${x.c.id} ${x.c.name} (${x.c.cur}°, ${x.c.status})`).join("; "):"all cases nominal."}`, action:b.length?{label:`Open ${st.name}`, node:{screen:"store",storeId:st.id}}:null }; }
+  return { text:`I'm Cryo. Try: "what's my priority today?", "what changed overnight?", "what's wrong with B12?", or "what parts for B12?"` };
 }
 
-function findResolvedWithoutNotes(issues, circuitNotes, storeId) {
-  const resolved = issues.filter(i => i.storeId === storeId && i.urgency === "Resolved");
-  return resolved.filter(issue => {
-    const hasNote = circuitNotes.some(n =>
-      n.storeId === storeId &&
-      (n.circuitId === issue.circuit || issue.circuit?.includes(n.circuitId)) &&
-      (n.type === "emergency" || n.type === "pm" || n.type === "resolved")
-    );
-    return !hasNote;
-  });
+const CRYO_SYS = `You are Cryo, the AI assistant built into CryoWatch — an app for commercial refrigeration technicians. You have deep, practical refrigeration knowledge: parallel/rack compressor systems, low- and med-temp circuits, superheat and subcooling, head pressure and condensers, defrost cycles, evaporator coils and fans, common compressor failure modes (tripped safeties on high head pressure or low oil, failed contactor or start components, overload/thermal trips, locked rotor, loss of charge, bad valves/reeds), RTUs and HVAC, refrigerants, and electrical controls.
+Talk like an experienced tech helping another tech: plain language, concise (2–5 sentences), specific and practical. When asked to diagnose, give the most likely causes ranked and the first things to check. Ground answers in the live system snapshot provided — actual racks, compressor states, readings, and notes. Be honest when something can't be known from the data alone, and remember you advise — the tech verifies, especially anything electrical or refrigerant-related. Plain prose only: no markdown headers, no bullet characters.`;
+
+function snapshot(stores, alarms, msgs, node){
+  const lines = stores.map(s=>{
+    const racks = (s.racks||[]).map(r=>{
+      const comps = r.comps.map(c=>`C${c.n} ${c.on?"running":"DOWN"}`).join(", ");
+      const cases = r.cases.map(c=>`${c.id} ${c.name} ${c.cur}°/${c.target}° ${c.status}${c.remark&&c.status!=="ok"?` [${c.remark}]`:""}`).join("; ");
+      return `  Rack ${r.id} (${r.name}; controls ${r.systems.join(" & ")}; compressors: ${comps}; suction ${r.suction}, condenser ${r.condenser}) → ${cases}`;
+    }).join("\n");
+    const rtus = (s.rtus||[]).map(u=>`${u.id} ${u.type} ${u.status}${u.note?` (${u.note})`:""}`).join("; ");
+    return `STORE ${s.name} ${s.number}:\n${racks}${rtus?`\n  RTUs: ${rtus}`:""}`;
+  }).join("\n");
+  const where = node.screen==="case"?`looking at case ${node.caseId}`:node.screen==="rack"?`looking at rack ${node.rackId}`:node.screen==="store"?"looking at a store":"on the home screen";
+  return `LIVE SYSTEM SNAPSHOT (the tech is currently ${where}):\n${lines}\nAlarms: ${alarms.map(a=>`${a.store} — ${a.text} [${a.state}]`).join("; ")||"none"}\nTech notes/hand-offs: ${msgs.map(m=>`${m.who}: ${m.text}`).join("; ")||"none"}`;
 }
 
-// ── Type system ──────────────────────────────────────────────────────────────────
-const F  = `'Oswald','Barlow Condensed','Segoe UI',sans-serif`;   // alpine condensed display
-const FB = `'Inter','Segoe UI',sans-serif`;                        // body
-const FM = `'Space Mono','JetBrains Mono',ui-monospace,monospace`; // instrument readouts
-
-const inp = { width:"100%", background:"#06121C", border:`1px solid ${C.line}`, borderRadius:8, color:C.txt, padding:"10px 12px", fontSize:14, boxSizing:"border-box", outline:"none", fontFamily:FB };
-const sel = { ...inp, cursor:"pointer" };
-const lbl = { display:"block", color:C.dim, fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:1.5, marginBottom:6, fontFamily:F };
-
-const getColor = id => STORE_COLORS[DEFAULT_STORES.findIndex(s=>s.id===id) % STORE_COLORS.length] || STORE_COLORS[0];
-const pad2     = n  => String(n).padStart(2,"0");
-const nowStr   = ()  => { const d=new Date(); return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; };
-const nowTime  = ()  => { const d=new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
-const shiftOf  = ()  => { const h=new Date().getHours(); return h<12?"AM":h<17?"PM":"EVE"; };
-
-// ── Global style: fonts, frost, cold-activation keyframes ──────────────────────────
-function GlobalStyle() {
-  return (
-    <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
-      @keyframes coldRise   { from { clip-path: inset(100% 0 0 0); } to { clip-path: inset(6% 0 0 0); } }
-      @keyframes twinkle    { 0%,100% { opacity:.25; } 50% { opacity:.9; } }
-      @keyframes drift      { from { transform: translateX(0); } to { transform: translateX(-40px); } }
-      @keyframes sheen      { 0% { background-position:-200% 0; } 100% { background-position:200% 0; } }
-      @keyframes floatUp    { from { opacity:0; transform: translateY(14px); } to { opacity:1; transform:none; } }
-      @keyframes pulseRing  { 0% { box-shadow:0 0 0 0 rgba(92,200,242,.45);} 100% { box-shadow:0 0 0 10px rgba(92,200,242,0);} }
-      .cw-snow { position:absolute; border-radius:50%; background:#cfeefb; animation:twinkle 4s ease-in-out infinite; }
-      .cw-card-lift { transition: transform .25s cubic-bezier(.2,.7,.3,1), box-shadow .25s, border-color .25s; }
-      .cw-card-lift:hover { transform: translateY(-4px); }
-      .cw-metal { background:
-          linear-gradient(135deg, rgba(255,255,255,.06), rgba(255,255,255,0) 40%),
-          linear-gradient(180deg, ${C.steel2}, ${C.steel}); }
-      .cw-sheen { position:relative; overflow:hidden; }
-      .cw-sheen::after { content:""; position:absolute; inset:0;
-          background:linear-gradient(115deg, transparent 30%, rgba(255,255,255,.10) 48%, transparent 60%);
-          background-size:200% 100%; animation:sheen 7s linear infinite; pointer-events:none; }
-      @media (prefers-reduced-motion: reduce) {
-        .cw-sheen::after, .cw-snow, [data-anim] { animation:none !important; }
-        [data-cold] { clip-path: inset(6% 0 0 0) !important; }
-      }
-      ::-webkit-scrollbar { width:10px; height:10px; }
-      ::-webkit-scrollbar-thumb { background:${C.line}; border-radius:8px; }
-      ::-webkit-scrollbar-thumb:hover { background:${C.lineLt}; }
-    `}</style>
-  );
+// ── interactive dot-wave background ────────────────────────────────────────────────
+function DotWave(){
+  const ref=useRef(null);
+  useEffect(()=>{
+    const c=ref.current; if(!c) return; const ctx=c.getContext("2d"); if(!ctx) return;
+    let raf,t=0; const mouse={x:-999,y:-999}; const dpr=Math.min(2,window.devicePixelRatio||1);
+    const resize=()=>{ c.width=c.offsetWidth*dpr; c.height=c.offsetHeight*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); };
+    resize(); window.addEventListener("resize",resize);
+    const onMove=e=>{ mouse.x=e.clientX; mouse.y=e.clientY; }; window.addEventListener("pointermove",onMove);
+    const hx=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+    const blue=hx(P.blue),vio=hx(P.violet),mag=hx(P.magenta); const L=(a,b,f)=>a+(b-a)*f;
+    const draw=()=>{
+      const w=c.offsetWidth,h=c.offsetHeight; ctx.clearRect(0,0,w,h); const gap=28; t+=0.011;
+      for(let x=-gap;x<w+gap;x+=gap){ const f=Math.min(1,Math.max(0,x/w));
+        const col=f<0.5?blue.map((b,i)=>L(b,vio[i],f*2)):vio.map((v,i)=>L(v,mag[i],(f-0.5)*2));
+        for(let y=-gap;y<h+gap;y+=gap){ const wave=Math.sin(x*0.012+y*0.006+t)*9+Math.cos(x*0.02-t*0.7)*5; const py=y+wave;
+          let r=1.9,a=0.42; const d=Math.hypot(x-mouse.x,py-mouse.y); if(d<90){ const k=1-d/90; r+=k*3; a=Math.min(1,a+k*0.55); }
+          a*=0.55+0.3*Math.sin(t*2+x*0.03+y*0.02); if(a<=0) continue;
+          ctx.beginPath(); ctx.arc(x,py,r,0,7); ctx.fillStyle=`rgba(${col[0]|0},${col[1]|0},${col[2]|0},${a.toFixed(3)})`; ctx.fill(); } }
+      raf=requestAnimationFrame(draw);
+    };
+    draw();
+    return ()=>{ cancelAnimationFrame(raf); window.removeEventListener("resize",resize); window.removeEventListener("pointermove",onMove); };
+  },[]);
+  return <canvas ref={ref} style={{ position:"fixed", inset:0, width:"100%", height:"100%", pointerEvents:"none", opacity:.5, zIndex:0 }}/>;
 }
 
-// ── Signature: cold-activated Rocky Mountain ridge ─────────────────────────────────
-const RIDGE_BACK  = "M0,200 L0,140 L120,160 L210,95 L300,140 L380,70 L470,130 L560,60 L660,120 L760,80 L860,140 L940,100 L1000,135 L1000,200 Z";
-const RIDGE_FRONT = "M0,200 L0,150 L90,168 L170,108 L250,150 L330,92 L420,148 L500,70 L590,140 L690,95 L780,150 L880,110 L1000,150 L1000,200 Z";
+// ── atoms ──────────────────────────────────────────────────────────────────────────
+const Dot=({s})=><span style={{ width:8,height:8,borderRadius:"50%",background:sCol(s),boxShadow:`0 0 8px ${sCol(s)}`,display:"inline-block",flexShrink:0 }}/>;
+const card={ background:`linear-gradient(180deg, ${P.panel2}, ${P.panel})`, border:`1px solid ${P.line}`, borderRadius:R };
+const lbl={ display:"block", color:P.dim, fontSize:10, fontWeight:600, textTransform:"uppercase", letterSpacing:1.2, marginBottom:5, fontFamily:F };
+const inp={ width:"100%", background:"#0A0818", border:`1px solid ${P.line}`, borderRadius:RB, color:P.txt, padding:"9px 11px", fontSize:13, boxSizing:"border-box", outline:"none", fontFamily:FB };
+const seg=(on,tint=P.cyan)=>({ background:on?P.panel2:"transparent", border:`1px solid ${on?tint:P.line}`, color:on?tint:P.dim, borderRadius:RB, padding:"7px 13px", cursor:"pointer", fontFamily:F, fontWeight:600, fontSize:12.5, letterSpacing:.5 });
+const primary={ background:`linear-gradient(135deg, ${P.violet}, ${P.magenta})`, border:"none", color:"#fff", borderRadius:RB, padding:"9px 16px", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5, fontSize:13 };
+const ghost={ background:P.panel, border:`1px solid ${P.line}`, color:P.txt, borderRadius:RB, padding:"9px 14px", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5, fontSize:13 };
+const head={ fontFamily:F, fontWeight:600, fontSize:13, letterSpacing:1.5, color:P.dim, margin:"4px 2px 12px" };
+const CryoMark=({size=30})=>(<div style={{ width:size, height:size, borderRadius:"50%", flexShrink:0, background:`conic-gradient(from 0deg, ${P.blue}, ${P.violet}, ${P.magenta}, ${P.cyan}, ${P.blue})`, display:"flex", alignItems:"center", justifyContent:"center", boxShadow:`0 0 16px ${P.magenta}66` }}><div style={{ width:size*0.42, height:size*0.42, borderRadius:"50%", background:P.bg0 }}/></div>);
 
-function FrostMountains({ height = 220, activate = false, animateOnce = false }) {
-  // Two ridge layers; the front ridge "cold activates" — a blue frost wash rises from the base.
-  const coldStyle = animateOnce
-    ? { animation:"coldRise 2.4s cubic-bezier(.2,.7,.2,1) .3s both" }
-    : { clipPath: activate ? "inset(6% 0 0 0)" : "inset(100% 0 0 0)", transition:"clip-path .9s cubic-bezier(.2,.7,.2,1)" };
+export default function App(){
+  const [user,setUser]=useState(null);
+  const [techs,setTechs]=useState(TECHS_0);
+  const [stores,setStores]=useState(STORES_0);
+  const [alarms,setAlarms]=useState(ALARMS_0);
+  const [msgs,setMsgs]=useState(MSGS_0);
+  const [truck,setTruck]=useState(TRUCK_0);
 
-  return (
-    <div style={{ position:"relative", width:"100%", height, pointerEvents:"none" }}>
-      {/* back ridge — frosted silver */}
-      <svg viewBox="0 0 1000 200" preserveAspectRatio="none" style={{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:.5 }}>
-        <defs>
-          <linearGradient id="backG" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#9FB3C2"/><stop offset="1" stopColor="#2A4A63"/>
-          </linearGradient>
-        </defs>
-        <path d={RIDGE_BACK} fill="url(#backG)"/>
-      </svg>
+  const [stack,setStack]=useState([{screen:"home"}]);
+  const [drawer,setDrawer]=useState(false);
+  const node=stack[stack.length-1];
+  const go=n=>setStack(s=>[...s,n]);
+  const back=()=>setStack(s=>s.length>1?s.slice(0,-1):s);
+  const goHome=()=>{ setStack([{screen:"home"}]); setDrawer(false); };
 
-      {/* front ridge — base frost white */}
-      <svg viewBox="0 0 1000 200" preserveAspectRatio="none" style={{ position:"absolute", inset:0, width:"100%", height:"100%" }}>
-        <defs>
-          <linearGradient id="frontG" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#F2F9FE"/><stop offset=".55" stopColor="#C6D6E2"/><stop offset="1" stopColor="#3A5A74"/>
-          </linearGradient>
-        </defs>
-        <path d={RIDGE_FRONT} fill="url(#frontG)"/>
-      </svg>
+  const [range,setRange]=useState("Month");
+  const [compare,setCompare]=useState(false);
+  const [editMode,setEditMode]=useState("view");
+  const [unitTab,setUnitTab]=useState("overview");
+  const [notifTab,setNotifTab]=useState("alarms");
+  const [ackView,setAckView]=useState(false);
+  const [partForm,setPartForm]=useState({cat:"belts",spec:"",qty:"1"});
+  const [newTech,setNewTech]=useState({name:"",role:"",email:""});
+  const [newStore,setNewStore]=useState({number:"",name:"",address:"",phone:""});
+  const [newPart,setNewPart]=useState({part:"",qty:"1"});
 
-      {/* front ridge — COLD-ACTIVATED blue overlay, revealed from bottom up */}
-      <svg data-cold viewBox="0 0 1000 200" preserveAspectRatio="none"
-           style={{ position:"absolute", inset:0, width:"100%", height:"100%", ...coldStyle }}>
-        <defs>
-          <linearGradient id="coldG" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#BFE9FB"/><stop offset=".4" stopColor={C.ice}/><stop offset="1" stopColor={C.deepIce}/>
-          </linearGradient>
-        </defs>
-        <path d={RIDGE_FRONT} fill="url(#coldG)"/>
-      </svg>
+  // Cryo assistant
+  const [cryoOpen,setCryoOpen]=useState(false);
+  const [chat,setChat]=useState([{role:"cryo",text:"I'm Cryo, your AI tech assistant. I know refrigeration — ask me to diagnose a case, explain a reading, or what needs attention. I'll reason over your live system data."}]);
+  const [chatIn,setChatIn]=useState("");
+  const [thinking,setThinking]=useState(false);
 
-      {/* snow caps glint on the peaks */}
-      <svg viewBox="0 0 1000 200" preserveAspectRatio="none" style={{ position:"absolute", inset:0, width:"100%", height:"100%" }}>
-        <path d="M500,70 L520,82 L500,76 L482,84 Z M330,92 L348,102 L330,98 L314,103 Z M690,95 L706,104 L690,100 L676,105 Z"
-              fill="#FFFFFF" opacity=".9"/>
-      </svg>
-    </div>
-  );
-}
+  const aStore = stores.find(s=>s.id===node.storeId);
+  const aRack  = aStore?.racks.find(r=>r.id===node.rackId);
+  const aCase  = aRack?.cases.find(c=>c.id===node.caseId);
+  const aRtu   = aStore?.rtus?.find(u=>u.id===node.rtuId);
+  const unread = alarms.filter(a=>!a.ack).length + msgs.filter(m=>!m.ack).length;
 
-// ── Small UI atoms ─────────────────────────────────────────────────────────────────
-function StatusDot({ status }) {
-  const colors = { ok:C.green, warn:C.orange, crit:C.crit };
-  const col = colors[status] || C.dim;
-  return <span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:col, boxShadow:`0 0 8px ${col}88`, marginRight:5, flexShrink:0 }}/>;
-}
+  useEffect(()=>{ setUnitTab("overview"); setEditMode("view"); },[node.screen,node.caseId,node.rtuId]);
 
-function TempBar({ current, low, high, status }) {
-  const range = high - low || 1;
-  const pct   = Math.min(100, Math.max(0, ((current - low) / range) * 100));
-  const color = status==="crit"?C.crit:status==="warn"?C.orange:C.ice;
-  return (
-    <div style={{ position:"relative", height:6, borderRadius:4, background:"#0A1A28", border:`1px solid ${C.line}`, width:"100%", marginTop:5, overflow:"hidden" }}>
-      <div style={{ position:"absolute", left:0, top:0, bottom:0, width:`${pct}%`, background:`linear-gradient(90deg, ${color}66, ${color})`, borderRadius:4, transition:"width .35s" }}/>
-    </div>
-  );
-}
+  const caseData = useMemo(()=>{
+    if(node.screen!=="case"||!aCase) return [];
+    const cutoff=Date.now()-RANGES[range]*DAY;
+    const base=genHistory(aCase.target,aCase.opts).filter(p=>p.t>=cutoff);
+    if(!compare) return base.map(p=>({ t:p.t, [aCase.id]:p.temp }));
+    const idx=new Map(base.map(p=>[p.t,{ t:p.t, [aCase.id]:p.temp }]));
+    (aRack?.cases||[]).filter(c=>c.id!==aCase.id).forEach(m=>genHistory(m.target,m.opts).filter(p=>p.t>=cutoff).forEach(p=>{ const row=idx.get(p.t); if(row) row[m.id]=p.temp; }));
+    return [...idx.values()];
+  },[node.screen,node.storeId,node.rackId,node.caseId,range,compare]);
 
-function NoteTypeBadge({ type }) {
-  const nt = NOTE_TYPES.find(t=>t.id===type) || NOTE_TYPES[NOTE_TYPES.length-1];
-  return (
-    <span style={{ background:nt.color+"22", border:`1px solid ${nt.color}55`, color:nt.color, borderRadius:5, padding:"2px 8px", fontSize:11, fontWeight:600, fontFamily:F, letterSpacing:.5, whiteSpace:"nowrap" }}>
-      {nt.icon} {nt.label}
-    </span>
-  );
-}
+  const findNode=text=>{ const m=(text||"").toLowerCase().match(/\b([a-z]\d{1,2}[a-z]?)\b/); if(!m) return null; let f=null; stores.forEach(s=>(s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.id.toLowerCase()===m[1]) f={s,r,c}; }))); return f?{label:`Open ${f.c.id}`, node:{screen:"case",storeId:f.s.id,rackId:f.r.id,caseId:f.c.id}}:null; };
+  const send=async(arg)=>{ const text=(arg!=null?arg:chatIn).trim(); if(!text) return; setChat(c=>[...c,{role:"user",text}]); setChatIn(""); setThinking(true);
+    const action=findNode(text);
+    try{
+      const res=await fetch("https://api.anthropic.com/v1/messages",{ method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ model:"claude-sonnet-4-6", max_tokens:1000, system:CRYO_SYS, messages:[{ role:"user", content:`${snapshot(stores,alarms,msgs,node)}\n\nThe tech asks: ${text}` }] }) });
+      if(!res.ok) throw new Error("api"); const data=await res.json();
+      const out=(data.content||[]).map(b=>b&&b.type==="text"?b.text:"").join("").trim();
+      if(!out) throw new Error("empty");
+      setChat(c=>[...c,{ role:"cryo", text:out, action }]);
+    }catch(e){ const a=brain(text,stores,alarms,msgs); setChat(c=>[...c,{ role:"cryo", ...a }]); }
+    setThinking(false);
+  };
+  const askCase=id=>{ setCryoOpen(true); send(`what's wrong with ${id}`); };
+  const mic=()=>{ try{ const SR=window.SpeechRecognition||window.webkitSpeechRecognition; if(!SR) return; const r=new SR(); r.lang="en-US"; r.interimResults=false; r.onresult=e=>setChatIn(e.results[0][0].transcript); r.start(); }catch(e){} };
 
-function ShiftBadge({ shift }) {
-  const colors = { AM:"#F2C94C", PM:C.purple, EVE:C.ice };
-  return <span style={{ color:colors[shift]||C.dim, fontSize:10, fontWeight:700, fontFamily:F, letterSpacing:1 }}>{shift}</span>;
-}
+  if(!user) return <Login techs={techs} onPick={u=>{ setUser(u); goHome(); }}/>;
 
-function Wordmark({ size=18 }) {
-  return (
-    <span style={{ fontFamily:F, fontWeight:600, fontSize:size, letterSpacing:2, display:"inline-flex", alignItems:"center", gap:7 }}>
-      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ flexShrink:0 }}>
-        <path d="M2 20 L8 9 L12 15 L16 6 L22 20 Z" fill={C.ice} opacity=".85"/>
-        <path d="M8 9 L10 11.5 L8.6 10.8 L7.2 11.7 Z M16 6 L18 9 L16 8 L14.4 9 Z" fill="#fff"/>
-      </svg>
-      <span style={{ color:C.frost }}>CRYO</span><span style={{ color:C.ice }}>WATCH</span>
-    </span>
-  );
-}
+  const flags = s => { let crit=0,warn=0; (s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.status==="crit")crit++; else if(c.status==="warn")warn++; })); (s.rtus||[]).forEach(u=>{ if(u.status==="warn")warn++; if(u.status==="crit")crit++; }); return {crit,warn}; };
+  const flagCases = s => { const out=[]; (s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.status!=="ok") out.push({rack:r,c}); })); return out.sort((a,b)=>(a.c.status==="crit"?0:1)-(b.c.status==="crit"?0:1)); };
+  const storePriority = s => { const f=flags(s); return f.crit?0:f.warn?1:s.overnight?2:3; };
+  const fmtX=t=>{ const d=new Date(t); return range==="Day"?`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`:range==="Week"?["Su","Mo","Tu","We","Th","Fr","Sa"][d.getDay()]:`${d.getMonth()+1}/${d.getDate()}`; };
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-//  LOGIN — pick your profile
-// ═══════════════════════════════════════════════════════════════════════════════════
-function Login({ onSelect }) {
-  const [hover, setHover] = useState(null);
-  const snow = Array.from({ length: 26 }, (_, i) => ({
-    left: (i * 37) % 100,
-    top: (i * 53) % 60,
-    size: (i % 3) + 1.5,
-    delay: (i % 7) * 0.6,
+  const mutateUnit = fn => setStores(prev=>prev.map(s=>{
+    if(s.id!==node.storeId) return s;
+    if(node.screen==="case") return {...s, racks:s.racks.map(r=>r.id!==node.rackId?r:{...r, cases:r.cases.map(c=>c.id!==node.caseId?c:fn(c))})};
+    return {...s, rtus:s.rtus.map(u=>u.id!==node.rtuId?u:fn(u))};
   }));
+  const addPart = (cat,spec,qty)=>{ if(!spec.trim()) return; mutateUnit(u=>({...u, parts:{...u.parts, [cat]:[...(u.parts?.[cat]||[]), {spec:spec.trim(), qty:Number(qty)||1}]}})); setPartForm(f=>({...f,spec:"",qty:"1"})); };
+  const removePart = (cat,i)=>mutateUnit(u=>({...u, parts:{...u.parts, [cat]:(u.parts?.[cat]||[]).filter((_,j)=>j!==i)}}));
 
-  return (
-    <div style={{ minHeight:"100vh", background:`radial-gradient(120% 90% at 50% -10%, #14344E 0%, ${C.deep}45%, ${C.abyss} 100%)`, color:C.txt, fontFamily:FB, position:"relative", overflow:"hidden" }}>
-      {/* drifting frost specks */}
-      <div style={{ position:"absolute", inset:0, overflow:"hidden", pointerEvents:"none" }}>
-        {snow.map((s,i)=>(
-          <span key={i} className="cw-snow" style={{ left:`${s.left}%`, top:`${s.top}%`, width:s.size, height:s.size, animationDelay:`${s.delay}s` }}/>
+  const chipsGrid = fields => (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:9 }}>
+      {fields.map(([k,v])=> editMode==="view"
+        ? <div key={k} style={{ background:"#0A0818", border:`1px solid ${P.line}`, borderRadius:RB, padding:"8px 11px" }}><div style={{ fontSize:10, color:P.pewter, fontFamily:F, letterSpacing:1, textTransform:"uppercase" }}>{k}</div><div style={{ fontSize:13.5, color:P.frost, marginTop:2 }}>{v}</div></div>
+        : <div key={k}><label style={lbl}>{k}</label><input defaultValue={v} style={inp}/></div>)}
+    </div>
+  );
+  const partsBlock = unit => {
+    const p=unit.parts||{};
+    return (
+      <div>
+        {PCATS.map(([k,label])=>{ const rows=p[k]||[]; if(rows.length===0&&editMode!=="edit") return null;
+          return (
+            <div key={k} style={{ marginBottom:13 }}>
+              <div style={{ fontFamily:F, fontWeight:600, fontSize:11, letterSpacing:1.2, color:P.cyan, marginBottom:6 }}>{label.toUpperCase()}</div>
+              {rows.length===0 && <div style={{ fontSize:12.5, color:P.pewter }}>None on file</div>}
+              {rows.map((r,i)=>(
+                <div key={i} style={{ display:"flex", alignItems:"center", gap:10, padding:"7px 11px", background:"#0A0818", border:`1px solid ${P.line}`, borderRadius:RB, marginBottom:6 }}>
+                  <span style={{ fontFamily:FM, color:P.magenta, fontWeight:700, fontSize:13 }}>{r.qty}×</span>
+                  <span style={{ flex:1, fontSize:13, color:P.frost }}>{r.spec}</span>
+                  {editMode==="edit" && <button onClick={()=>removePart(k,i)} style={{ background:"none", border:`1px solid ${P.line}`, color:P.crit, borderRadius:8, cursor:"pointer", padding:"2px 9px", fontFamily:F }}>remove</button>}
+                </div>
+              ))}
+            </div>
+          ); })}
+        {editMode==="edit" && (
+          <div style={{ borderTop:`1px solid ${P.line}`, marginTop:6, paddingTop:12, display:"flex", gap:8, flexWrap:"wrap", alignItems:"flex-end" }}>
+            <div style={{ flex:"1 1 110px" }}><label style={lbl}>Category</label>
+              <select value={partForm.cat} onChange={e=>setPartForm(f=>({...f,cat:e.target.value}))} style={{ ...inp, appearance:"auto" }}>{PCATS.map(([k,label])=><option key={k} value={k} style={{color:"#000"}}>{label}</option>)}</select></div>
+            <div style={{ flex:"3 1 160px" }}><label style={lbl}>Part / spec</label><input value={partForm.spec} onChange={e=>setPartForm(f=>({...f,spec:e.target.value}))} placeholder="e.g. BX-48 V-belt" style={inp}/></div>
+            <div style={{ flex:"1 1 60px" }}><label style={lbl}>Qty</label><input value={partForm.qty} onChange={e=>setPartForm(f=>({...f,qty:e.target.value}))} style={inp}/></div>
+            <button onClick={()=>addPart(partForm.cat,partForm.spec,partForm.qty)} style={{ ...primary, height:38 }}>Add</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+  const albumBlock = unit => (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(104px,1fr))", gap:9 }}>
+      {(unit.photos||[]).map((ph,i)=>(
+        <div key={i} className="glow" style={{ borderRadius:R, overflow:"hidden", border:`1px solid ${P.line}`, cursor:"pointer", aspectRatio:"1", position:"relative", background:`linear-gradient(135deg, ${[P.blue,P.violet,P.magenta,P.cyan][i%4]}55, ${P.panel} 70%)` }}>
+          <div style={{ position:"absolute", left:0, right:0, bottom:0, padding:"5px 7px", background:"linear-gradient(180deg, transparent, #000a)", fontSize:10 }}><div style={{ color:P.frost, fontWeight:600 }}>{ph.cap}</div><div style={{ color:P.dim, fontFamily:FM }}>{ph.who} · {ph.date}</div></div>
+        </div>
+      ))}
+      <button className="glow" style={{ aspectRatio:"1", borderRadius:R, border:`1px dashed ${P.lineLt}`, background:"transparent", color:P.dim, cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:4, fontFamily:F, fontSize:12 }}><span style={{ fontSize:20, color:P.violet }}>+</span> Add photo</button>
+    </div>
+  );
+  const unitTabBar = () => (
+    <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+      {["overview","parts","album"].map(t=><button key={t} onClick={()=>setUnitTab(t)} style={seg(unitTab===t)}>{t[0].toUpperCase()+t.slice(1)}</button>)}
+      <div style={{ flex:1 }}/>
+      <button onClick={()=>setEditMode("view")} style={seg(editMode==="view")}>View</button>
+      <button onClick={()=>setEditMode("edit")} style={seg(editMode==="edit",P.magenta)}>Edit</button>
+    </div>
+  );
+
+  // ── screens ──
+  const Home = () => {
+    const sorted=[...stores].sort((a,b)=>storePriority(a)-storePriority(b));
+    const bad=[]; stores.forEach(s=>(s.racks||[]).forEach(r=>r.cases.forEach(c=>{ if(c.status!=="ok") bad.push({s,r,c}); })));
+    bad.sort((a,b)=>(a.c.status==="crit"?0:1)-(b.c.status==="crit"?0:1));
+    const hr=new Date().getHours(); const part=hr<12?"morning":hr<18?"afternoon":"evening";
+    const storesHit=new Set(bad.map(x=>x.s.id)).size; const top=bad[0];
+    return (
+      <Wrap>
+        {/* Cryo morning briefing */}
+        <div style={{ ...card, borderColor:P.lineLt, padding:"15px 16px", marginBottom:16, boxShadow:`0 0 0 1px ${P.violet}22, 0 18px 50px -30px ${P.magenta}` }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10 }}>
+            <CryoMark size={30}/><div style={{ fontFamily:F, fontWeight:600, letterSpacing:1.5, fontSize:12, color:P.pink }}>CRYO · BRIEFING</div>
+            <div style={{ flex:1 }}/><span style={{ fontSize:11, color:P.pewter, fontFamily:FM }}>prepared {String(hr).padStart(2,"0")}:05</span>
+          </div>
+          <div style={{ fontFamily:F, fontWeight:600, fontSize:18, color:P.frost, marginBottom:6 }}>Good {part}, {user.name.split(" ")[0]}.</div>
+          <div style={{ fontSize:13.5, color:P.txt, lineHeight:1.55 }}>
+            {bad.length
+              ? <>{storesHit} of your {stores.length} stores need you. Your priority is <b style={{color:P.crit}}>{top.c.id} {top.c.name}</b> at {top.s.name} — {top.c.remark}</>
+              : <>All quiet — every case across your {stores.length} stores is in range. I'll ping you the moment that changes.</>}
+          </div>
+          {bad.length>0 && <div style={{ marginTop:12 }}>
+            <div style={{ fontFamily:F, fontSize:10.5, letterSpacing:1.5, color:P.dim, marginBottom:7 }}>RUN ORDER</div>
+            {bad.slice(0,3).map((x,i)=>(
+              <div key={x.c.id} onClick={()=>go({screen:"case",storeId:x.s.id,rackId:x.r.id,caseId:x.c.id})} className="glow" style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 11px", background:"#0A0818", border:`1px solid ${P.line}`, borderRadius:RB, marginBottom:6, cursor:"pointer" }}>
+                <span style={{ fontFamily:FM, color:P.dim, fontSize:12 }}>{i+1}</span><Dot s={x.c.status}/>
+                <span style={{ fontFamily:F, color:P.frost, fontSize:13.5 }}>{x.c.id} {x.c.name}</span>
+                <span style={{ fontFamily:FM, color:sCol(x.c.status), fontSize:12.5 }}>{x.c.cur}°</span>
+                <span style={{ fontSize:11.5, color:P.dim }}>· {x.s.name}</span><div style={{ flex:1 }}/><span style={{ color:P.dim }}>›</span>
+              </div>
+            ))}
+          </div>}
+          <div style={{ marginTop:10, fontSize:12, color:P.dim, lineHeight:1.5 }}><span style={{ color:P.cyan }}>Watching:</span> B02 produce fan was replaced 6/4 — trend's normal since; I'll flag it if it slips again.</div>
+          <div style={{ display:"flex", gap:8, marginTop:13, flexWrap:"wrap" }}>
+            {bad.length>0 && <button onClick={()=>go({screen:"case",storeId:top.s.id,rackId:top.r.id,caseId:top.c.id})} style={primary}>Open {top.c.id}</button>}
+            <button onClick={()=>{ setCryoOpen(true); }} style={ghost}>Ask Cryo</button>
+          </div>
+        </div>
+
+        <div style={head}>YOUR STORES · {stores.length}</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))", gap:12 }}>
+          {sorted.map(s=>{ const f=flags(s); const pc=f.crit?P.crit:f.warn?P.amber:s.overnight?P.violet:P.green;
+            return (
+              <div key={s.id} onClick={()=>go({screen:"store",storeId:s.id})} className="glow" style={{ ...card, borderLeft:`4px solid ${pc}`, padding:14, cursor:"pointer" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+                  <div><div style={{ fontFamily:F, fontWeight:600, fontSize:18, letterSpacing:.5, color:P.frost }}>{s.name}</div>
+                    <div style={{ fontSize:11.5, color:P.dim, marginTop:2 }}>{s.number} · {s.address.split(",")[0]}</div></div>
+                  {f.crit>0 && <span style={{ background:P.crit+"22", border:`1px solid ${P.crit}66`, color:P.crit, borderRadius:RB, padding:"2px 9px", fontSize:13, fontWeight:700, fontFamily:FM }}>{f.crit}</span>}
+                </div>
+                <div style={{ display:"flex", gap:10, marginTop:12, fontSize:12, color:P.dim, alignItems:"center" }}>
+                  <Dot s={f.crit?"crit":f.warn?"warn":"ok"}/>
+                  <span>{f.crit?`${f.crit} today`:f.warn?`${f.warn} watch`:"all nominal"}</span>
+                  <div style={{ flex:1 }}/><span>{s.racks.length} rack(s) · {(s.rtus||[]).length} RTU</span>
+                </div>
+              </div>
+            ); })}
+        </div>
+      </Wrap>
+    );
+  };
+
+  const Store = () => (
+    <Wrap>
+      <Crumb path={[aStore.name]} onBack={back}/>
+      <div style={{ ...card, padding:15, marginBottom:14 }}>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:20, letterSpacing:.5, color:P.frost }}>{aStore.name} <span style={{ color:P.dim, fontSize:14 }}>{aStore.number}</span></div>
+        <div style={{ fontSize:12.5, color:P.dim, marginTop:4 }}>{aStore.address}</div>
+        {aStore.phone && <div style={{ fontSize:12.5, color:P.cyan, marginTop:2 }}>{aStore.phone}</div>}
+      </div>
+      {flagCases(aStore).length>0 && (
+        <div style={{ background:P.crit+"12", border:`1px solid ${P.crit}55`, borderRadius:R, padding:"12px 15px", marginBottom:14 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}><Dot s="crit"/><span style={{ fontFamily:F, fontWeight:600, fontSize:13, color:P.crit, letterSpacing:.5 }}>RED FLAGS TODAY</span></div>
+          {flagCases(aStore).map(({rack,c})=>(
+            <div key={c.id} onClick={()=>go({screen:"case",storeId:aStore.id,rackId:rack.id,caseId:c.id})} className="glow" style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 11px", cursor:"pointer", background:"#0A0818", border:`1px solid ${P.line}`, borderRadius:RB, marginTop:7 }}>
+              <Dot s={c.status}/><span style={{ fontFamily:F, color:P.frost, fontSize:14 }}>{c.id} {c.name}</span>
+              <span style={{ fontFamily:FM, color:sCol(c.status), fontSize:13 }}>{c.cur}°</span>
+              <span style={{ fontSize:12, color:P.dim }}>· Rack {rack.id}</span><div style={{ flex:1 }}/><span style={{ color:P.dim }}>›</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={head}>RACKS</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(260px,1fr))", gap:12 }}>
+        {aStore.racks.map(r=>{ const down=r.comps.filter(c=>!c.on); const bad=r.cases.some(c=>c.status==="crit");
+          return (
+            <div key={r.id} onClick={()=>go({screen:"rack",storeId:aStore.id,rackId:r.id})} className="glow" style={{ ...card, borderLeft:`4px solid ${down.length||bad?P.crit:P.green}`, padding:14, cursor:"pointer" }}>
+              <div style={{ fontFamily:F, fontWeight:600, fontSize:16, color:P.frost, letterSpacing:.5 }}>{r.name}</div>
+              <div style={{ fontSize:12, color:P.dim, marginTop:3 }}>Controls: {r.systems.join(" · ")}</div>
+              <div style={{ display:"flex", gap:6, marginTop:10, flexWrap:"wrap" }}>
+                {r.comps.map(cp=><span key={cp.n} style={{ fontFamily:FM, fontSize:11, fontWeight:700, padding:"2px 9px", borderRadius:RB, background:(cp.on?P.green:P.crit)+"1A", border:`1px solid ${(cp.on?P.green:P.crit)}66`, color:cp.on?P.green:P.crit }}>C{cp.n} {cp.on?"on":"DOWN"}</span>)}
+              </div>
+              <div style={{ display:"flex", gap:12, marginTop:10, fontSize:12, color:P.dim, fontFamily:FM }}>
+                <span>Suct {r.suction}</span><span>Cond {r.condenser}</span><div style={{ flex:1 }}/><span>{r.cases.length} cases</span>
+              </div>
+            </div>
+          ); })}
+      </div>
+      {(aStore.rtus||[]).length>0 && <>
+        <div style={head}>ROOFTOP UNITS</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:11 }}>
+          {aStore.rtus.map(u=>(
+            <div key={u.id} onClick={()=>go({screen:"rtu",storeId:aStore.id,rtuId:u.id})} className="glow" style={{ ...card, borderLeft:`3px solid ${sCol(u.status)}`, padding:13, cursor:"pointer" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}><span style={{ fontFamily:F, fontWeight:600, fontSize:14, color:P.frost, letterSpacing:.5 }}>{u.name}</span><Dot s={u.status}/></div>
+              <div style={{ fontSize:12, color:P.dim, marginTop:5 }}>{u.type} · {u.location}</div>
+              {u.note && <div style={{ fontSize:11.5, color:P.amber, marginTop:5 }}>{u.note}</div>}
+            </div>
+          ))}
+        </div>
+      </>}
+    </Wrap>
+  );
+
+  const Rack = () => (
+    <Wrap>
+      <Crumb path={[aStore.name, aRack.name]} onBack={back}/>
+      <div style={{ ...card, padding:15, marginBottom:14 }}>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:19, color:P.frost, letterSpacing:.5 }}>{aRack.name}</div>
+        <div style={{ fontSize:12.5, color:P.dim, marginTop:3 }}>Controls {aRack.systems.join(" · ")}</div>
+        <div style={{ display:"flex", gap:8, marginTop:12, flexWrap:"wrap" }}>
+          {aRack.comps.map(cp=>(
+            <div key={cp.n} style={{ flex:"1 1 90px", background:"#0A0818", border:`1px solid ${(cp.on?P.green:P.crit)}55`, borderRadius:RB, padding:"10px 12px", textAlign:"center" }}>
+              <div style={{ fontFamily:FM, fontWeight:700, fontSize:16, color:cp.on?P.green:P.crit }}>{cp.on?"RUNNING":"DOWN"}</div>
+              <div style={{ fontSize:11, color:P.dim, fontFamily:F, letterSpacing:1, marginTop:3 }}>COMPRESSOR {cp.n}</div>
+            </div>
+          ))}
+        </div>
+        {aRack.comps.some(c=>!c.on) && <div style={{ marginTop:10, fontSize:12.5, color:P.amber }}>Compressor {aRack.comps.filter(c=>!c.on).map(c=>c.n).join(", ")} down — combined capacity reduced on {aRack.systems.join(" / ")}.</div>}
+      </div>
+      <div style={head}>CASES ON THIS RACK</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:11 }}>
+        {aRack.cases.map(c=>(
+          <div key={c.id} onClick={()=>go({screen:"case",storeId:aStore.id,rackId:aRack.id,caseId:c.id})} className="glow" style={{ ...card, borderLeft:`3px solid ${sCol(c.status)}`, padding:13, cursor:"pointer" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}><span style={{ fontFamily:F, fontWeight:600, fontSize:14, color:P.frost, letterSpacing:.5 }}>{c.id} {c.name}</span><Dot s={c.status}/></div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginTop:8 }}><span style={{ fontFamily:FM, fontSize:22, fontWeight:700, color:sCol(c.status) }}>{c.cur}°</span><span style={{ fontSize:11, color:P.dim, fontFamily:FM }}>target {c.target}°</span></div>
+          </div>
         ))}
       </div>
+    </Wrap>
+  );
 
-      {/* content */}
-      <div style={{ position:"relative", zIndex:2, maxWidth:880, margin:"0 auto", padding:"clamp(40px,7vh,90px) 20px 0", textAlign:"center", animation:"floatUp .8s ease both" }}>
-        <div style={{ display:"inline-flex", alignItems:"center", gap:8, border:`1px solid ${C.line}`, background:"#0B1C2A99", borderRadius:999, padding:"5px 14px", fontFamily:F, fontSize:11, letterSpacing:2, color:C.ice, marginBottom:22 }}>
-          <span style={{ width:7, height:7, borderRadius:"50%", background:C.green, boxShadow:`0 0 8px ${C.green}` }}/> COLD-CHAIN ONLINE · COLORADO
+  const Case = () => {
+    const mates=aRack.cases.filter(c=>c.id!==aCase.id);
+    return (
+      <Wrap>
+        <Crumb path={[aStore.name, `Rack ${aRack.id}`, `${aCase.id} ${aCase.name}`]} onBack={back}/>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:14, marginBottom:14 }}>
+          <div><div style={{ fontFamily:F, fontWeight:600, fontSize:23, letterSpacing:1, color:P.frost }}>{aCase.id} · {aCase.name}</div>
+            <div style={{ fontSize:12.5, color:P.dim, marginTop:3 }}>{aStore.name} · System {aCase.sys} · {aCase.model}</div></div>
+          <div style={{ display:"flex", gap:18, alignItems:"flex-end" }}>
+            <div style={{ textAlign:"right" }}><div style={{ fontFamily:FM, fontSize:36, fontWeight:700, color:sCol(aCase.status), lineHeight:1, letterSpacing:-1, textShadow:`0 0 18px ${sCol(aCase.status)}66` }}>{aCase.cur}°</div>
+              <div style={{ fontSize:11, color:sCol(aCase.status), fontFamily:F, fontWeight:700, letterSpacing:1, marginTop:4 }}>{aCase.status.toUpperCase()}</div></div>
+            <div style={{ textAlign:"right" }}><div style={{ fontFamily:FM, fontSize:21, fontWeight:700, color:P.txt }}>{aCase.target}°</div><div style={{ fontSize:11, color:P.dim, fontFamily:F, letterSpacing:1, marginTop:6 }}>TARGET</div></div>
+          </div>
         </div>
-        <div style={{ marginBottom:8 }}><Wordmark size={46}/></div>
-        <h1 style={{ fontFamily:F, fontWeight:300, fontSize:"clamp(20px,3.4vw,30px)", letterSpacing:1, color:C.frost, margin:"6px 0 6px" }}>
-          Frost-brewed refrigeration monitoring.
-        </h1>
-        <p style={{ color:C.dim, fontSize:15, maxWidth:520, margin:"0 auto 30px", lineHeight:1.6 }}>
-          Every rack, every case, every defrost — watched cold and caught early. Pick your profile to start your shift.
-        </p>
+        {unitTabBar()}
+        {unitTab==="overview" && <>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center", marginBottom:10 }}>
+            {Object.keys(RANGES).map(rk=><button key={rk} onClick={()=>setRange(rk)} style={seg(range===rk)}>{rk}</button>)}
+            <div style={{ flex:1 }}/><button onClick={()=>setCompare(c=>!c)} style={seg(compare,P.magenta)}>Compare rack-mates</button>
+          </div>
+          <div style={{ ...card, padding:"14px 8px 8px", marginBottom:14 }}>
+            <ResponsiveContainer width="100%" height={250}>
+              <LineChart data={caseData} margin={{ top:6, right:14, left:-8, bottom:0 }}>
+                <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stopColor={P.blue}/><stop offset="0.5" stopColor={P.violet}/><stop offset="1" stopColor={P.magenta}/></linearGradient></defs>
+                <CartesianGrid stroke={P.line} strokeDasharray="3 3" vertical={false}/>
+                <ReferenceArea y1={aCase.target+aCase.band} y2={999} fill={P.crit} fillOpacity={0.07}/>
+                <ReferenceLine y={aCase.target} stroke={P.dim} strokeDasharray="5 4" label={{ value:`target ${aCase.target}°`, fill:P.dim, fontSize:10, position:"insideTopLeft" }}/>
+                <XAxis dataKey="t" tickFormatter={fmtX} tick={{ fill:P.dim, fontSize:10, fontFamily:FM }} stroke={P.line} minTickGap={36}/>
+                <YAxis tick={{ fill:P.dim, fontSize:10, fontFamily:FM }} stroke={P.line} width={34} domain={["dataMin-3","dataMax+3"]}/>
+                <Tooltip contentStyle={{ background:P.bg0, border:`1px solid ${P.lineLt}`, borderRadius:8, fontFamily:FM, fontSize:12 }} labelFormatter={t=>new Date(t).toLocaleString()} formatter={v=>[`${v}°F`]}/>
+                <Line type="monotone" dataKey={aCase.id} stroke={compare?(aCase.color||P.cyan):"url(#lg)"} strokeWidth={2.4} dot={false} isAnimationActive={false}/>
+                {compare && mates.map(m=><Line key={m.id} type="monotone" dataKey={m.id} stroke={m.color||P.sky} strokeWidth={1.3} strokeOpacity={0.55} dot={false} isAnimationActive={false}/>)}
+              </LineChart>
+            </ResponsiveContainer>
+            {compare && <div style={{ display:"flex", gap:14, flexWrap:"wrap", padding:"4px 10px 6px", fontSize:11, fontFamily:F }}><span style={{ color:aCase.color||P.cyan }}>● {aCase.id}</span>{mates.map(m=><span key={m.id} style={{ color:m.color||P.sky, opacity:.85 }}>● {m.id} {m.name}</span>)}</div>}
+          </div>
+          <div style={{ background:P.violet+"18", border:`1px solid ${P.violet}66`, borderLeft:`3px solid ${P.violet}`, borderRadius:R, padding:"12px 15px", marginBottom:10 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}><CryoMark size={20}/><span style={{ fontFamily:F, fontWeight:600, fontSize:13, color:P.pink }}>Cryo · likely cause</span></div>
+            <div style={{ fontSize:13, color:P.txt, lineHeight:1.55 }}>{aCase.remark}</div>
+            <button onClick={()=>askCase(aCase.id)} style={{ ...seg(false), marginTop:10 }}>Ask Cryo about this case</button>
+          </div>
+          <div style={{ background:"#0A0818", border:`1px solid ${P.line}`, borderLeft:`3px solid ${P.green}`, borderRadius:R, padding:"11px 15px", marginBottom:16 }}>
+            <div style={{ fontSize:10, color:P.pewter, fontFamily:F, letterSpacing:1.2, marginBottom:3 }}>CASE SUMMARY</div>
+            <div style={{ fontSize:13.5, color:P.frost, lineHeight:1.5 }}>{aCase.summary}</div>
+          </div>
+          <div style={{ ...card, padding:15 }}>{chipsGrid([["Model",aCase.model],["Serial",aCase.serial],["Target",`${aCase.target}°F`],["Refrigerant",aCase.refrig],["Location",aCase.location],["Rack / System",`${aRack.id} · Sys ${aCase.sys}`]])}
+            {editMode==="edit" && <div style={{ display:"flex", gap:9, marginTop:14 }}><button onClick={()=>setEditMode("view")} style={{ ...ghost, flex:1 }}>Cancel</button><button onClick={()=>setEditMode("view")} style={{ ...primary, flex:2 }}>Save</button></div>}
+          </div>
+        </>}
+        {unitTab==="parts" && <div style={{ ...card, padding:15 }}>{partsBlock(aCase)}</div>}
+        {unitTab==="album" && <div style={{ ...card, padding:15 }}>{albumBlock(aCase)}</div>}
+      </Wrap>
+    );
+  };
 
-        {/* profile picker */}
-        <div style={{ fontFamily:F, fontSize:12, letterSpacing:2, color:C.pewter, marginBottom:14 }}>SELECT YOUR PROFILE</div>
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(180px,1fr))", gap:14, maxWidth:760, margin:"0 auto" }}>
-          {TECHS.map((t,idx)=>{
-            const active = hover===t.id;
-            return (
-              <button key={t.id}
-                onMouseEnter={()=>setHover(t.id)} onMouseLeave={()=>setHover(null)}
-                onClick={()=>onSelect(t)}
-                className="cw-card-lift cw-metal"
-                style={{ position:"relative", border:`1px solid ${active?t.tint:C.line}`, borderRadius:14, padding:"18px 16px 0", cursor:"pointer", textAlign:"left", overflow:"hidden", color:C.txt,
-                  boxShadow: active ? `0 14px 34px -12px ${t.tint}66, inset 0 1px 0 rgba(255,255,255,.08)` : "0 6px 18px -10px #000a, inset 0 1px 0 rgba(255,255,255,.05)",
-                  animation:`floatUp .6s ${0.15*idx+0.2}s ease both` }}>
-                {/* badge top */}
-                <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
-                  <div style={{ width:46, height:46, borderRadius:12, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, fontWeight:600, fontSize:18, letterSpacing:1, color:C.abyss,
-                    background:`linear-gradient(135deg, ${t.tint}, ${C.chrome})`,
-                    boxShadow: active?`0 0 0 3px ${t.tint}33`:"none", transition:"box-shadow .25s" }}>
-                    {t.initials}
-                  </div>
-                  <div style={{ minWidth:0 }}>
-                    <div style={{ fontFamily:F, fontWeight:500, fontSize:17, letterSpacing:.5, color:C.frost, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{t.name}</div>
-                    <div style={{ fontSize:11.5, color:active?t.tint:C.dim, transition:"color .2s" }}>{t.role}</div>
-                  </div>
-                </div>
-                <div style={{ fontSize:11, color:C.pewter, letterSpacing:.5, marginBottom:14, display:"flex", alignItems:"center", gap:6 }}>
-                  <span style={{ fontFamily:F }}>◷</span> {t.region}
-                </div>
-                {/* cold-activating mini ridge */}
-                <div style={{ margin:"0 -16px -1px" }}>
-                  <FrostMountains height={64} activate={active}/>
-                </div>
-              </button>
-            );
-          })}
+  const Rtu = () => (
+    <Wrap>
+      <Crumb path={[aStore.name, aRtu.name]} onBack={back}/>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:14, marginBottom:14 }}>
+        <div><div style={{ fontFamily:F, fontWeight:600, fontSize:22, letterSpacing:.5, color:P.frost }}>{aRtu.name}</div>
+          <div style={{ fontSize:12.5, color:P.dim, marginTop:3 }}>{aRtu.type} · {aRtu.model} · {aRtu.location}</div></div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}><Dot s={aRtu.status}/><span style={{ fontFamily:F, fontWeight:700, fontSize:12, color:sCol(aRtu.status), letterSpacing:1 }}>{aRtu.status.toUpperCase()}</span></div>
+      </div>
+      {unitTabBar()}
+      {unitTab==="overview" && <>
+        {aRtu.note && <div style={{ background:P.amber+"14", border:`1px solid ${P.amber}55`, borderLeft:`3px solid ${P.amber}`, borderRadius:R, padding:"11px 15px", marginBottom:14, fontSize:13, color:P.frost }}>{aRtu.note}</div>}
+        <div style={{ ...card, padding:15 }}>{chipsGrid([["Model",aRtu.model],["Serial",aRtu.serial],["Type",aRtu.type],["Location",aRtu.location],["Status",aRtu.status]])}
+          {editMode==="edit" && <div style={{ display:"flex", gap:9, marginTop:14 }}><button onClick={()=>setEditMode("view")} style={{ ...ghost, flex:1 }}>Cancel</button><button onClick={()=>setEditMode("view")} style={{ ...primary, flex:2 }}>Save</button></div>}
         </div>
-        <div style={{ marginTop:20, color:C.dim, fontSize:11.5 }}>
-          No password screen here — this is a local demo build. Choose any profile to explore.
+      </>}
+      {unitTab==="parts" && <div style={{ ...card, padding:15 }}>{partsBlock(aRtu)}</div>}
+      {unitTab==="album" && <div style={{ ...card, padding:15 }}>{albumBlock(aRtu)}</div>}
+    </Wrap>
+  );
+
+  const Notifications = () => {
+    const isA=notifTab==="alarms"; const src=isA?alarms:msgs;
+    const acked=src.filter(n=>n.ack), list=ackView?acked:src.filter(n=>!n.ack);
+    const ackOne=id=>isA?setAlarms(a=>a.map(x=>x.id===id?{...x,ack:true}:x)):setMsgs(m=>m.map(x=>x.id===id?{...x,ack:true}:x));
+    const openTarget=n=>{ if(isA){ go({screen:"case",storeId:n.storeId,rackId:n.rackId,caseId:n.caseId}); } else if(n.storeId){ go({screen:"store",storeId:n.storeId}); } };
+    return (
+      <Wrap>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:20, letterSpacing:1, color:P.frost, marginBottom:14 }}>Notifications</div>
+        <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+          <button onClick={()=>{setNotifTab("alarms");setAckView(false);}} style={{ ...seg(isA,P.crit), flex:1 }}>Alarms {alarms.filter(a=>!a.ack).length?`(${alarms.filter(a=>!a.ack).length})`:""}</button>
+          <button onClick={()=>{setNotifTab("messages");setAckView(false);}} style={{ ...seg(!isA,P.cyan), flex:1 }}>Tech messages {msgs.filter(m=>!m.ack).length?`(${msgs.filter(m=>!m.ack).length})`:""}</button>
+        </div>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+          <span style={{ fontSize:12, color:P.dim, fontFamily:F, letterSpacing:.5 }}>{ackView?"ACKNOWLEDGED":"ACTIVE & UNREAD"}</span>
+          <button onClick={()=>setAckView(v=>!v)} style={seg(false)}>{ackView?"← Back to active":`Acknowledged (${acked.length})`}</button>
+        </div>
+        {list.map(n=>{ const col=isA?sCol(n.sev):P.cyan;
+          return (
+            <div key={n.id} onClick={()=>openTarget(n)} className="glow" style={{ ...card, borderLeft:`3px solid ${n.ack?P.line:col}`, opacity:n.ack?.6:1, padding:"12px 15px", marginBottom:10, cursor:"pointer" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", gap:8, marginBottom:4, alignItems:"center" }}>
+                <span style={{ fontFamily:F, fontWeight:600, fontSize:13, color:n.ack?P.dim:col, letterSpacing:.3 }}>{isA?n.store:n.who}</span>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  {isA && <span style={{ fontSize:10, fontWeight:700, fontFamily:F, letterSpacing:.8, padding:"1px 7px", borderRadius:6, color:n.state==="active"?P.crit:P.green, background:(n.state==="active"?P.crit:P.green)+"1A", border:`1px solid ${(n.state==="active"?P.crit:P.green)}55` }}>{n.state==="active"?"ACTIVE":"CLEARED"}</span>}
+                  <span style={{ fontSize:11, color:P.pewter, fontFamily:FM }}>{n.time}</span>
+                </div>
+              </div>
+              <div style={{ fontSize:13, color:P.txt, lineHeight:1.5 }}>{n.text}</div>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:9 }}>
+                <span style={{ fontSize:11, color:P.dim }}>{isA?"Tap to open case":n.storeId?"Tap to open store":""}</span>
+                {!n.ack && <button onClick={e=>{ e.stopPropagation(); ackOne(n.id); }} style={seg(false)}>Acknowledge</button>}
+                {n.ack && <span style={{ fontSize:11, color:P.green, fontFamily:F, letterSpacing:.5 }}>Acknowledged</span>}
+              </div>
+            </div>
+          ); })}
+        {list.length===0 && <div style={{ textAlign:"center", color:P.dim, padding:"40px 0" }}>{ackView?"No acknowledged items.":"Nothing active — you're clear."}</div>}
+      </Wrap>
+    );
+  };
+
+  const TruckStock = () => (
+    <Wrap>
+      <div style={{ fontFamily:F, fontWeight:600, fontSize:20, letterSpacing:1, color:P.frost, marginBottom:6 }}>Truck Stock</div>
+      <div style={{ fontSize:12.5, color:P.dim, marginBottom:16 }}>What you're carrying. Update as you use and restock.</div>
+      <div style={{ ...card, padding:15 }}>
+        {truck.map(t=>(
+          <div key={t.id} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 0", borderTop:`1px solid ${P.line}` }}>
+            <span style={{ flex:1, fontSize:13.5, color:P.frost }}>{t.part}</span>
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <button onClick={()=>setTruck(p=>p.map(x=>x.id===t.id?{...x,qty:Math.max(0,x.qty-1)}:x))} style={{ ...ghost, padding:"4px 11px" }}>−</button>
+              <span style={{ fontFamily:FM, fontWeight:700, color:t.qty<=1?P.amber:P.cyan, minWidth:24, textAlign:"center" }}>{t.qty}</span>
+              <button onClick={()=>setTruck(p=>p.map(x=>x.id===t.id?{...x,qty:x.qty+1}:x))} style={{ ...ghost, padding:"4px 11px" }}>+</button>
+              <button onClick={()=>setTruck(p=>p.filter(x=>x.id!==t.id))} style={{ ...ghost, padding:"4px 10px", color:P.crit }}>×</button>
+            </div>
+          </div>
+        ))}
+        <div style={{ display:"flex", gap:8, marginTop:16, alignItems:"flex-end" }}>
+          <div style={{ flex:1 }}><label style={lbl}>Add part</label><input value={newPart.part} onChange={e=>setNewPart(f=>({...f,part:e.target.value}))} placeholder="e.g. 16x20x2 filter" style={inp}/></div>
+          <div style={{ width:64 }}><label style={lbl}>Qty</label><input value={newPart.qty} onChange={e=>setNewPart(f=>({...f,qty:e.target.value}))} style={inp}/></div>
+          <button onClick={()=>{ if(!newPart.part.trim()) return; setTruck(p=>[...p,{id:Date.now(),part:newPart.part.trim(),qty:Number(newPart.qty)||1}]); setNewPart({part:"",qty:"1"}); }} style={{ ...primary, height:38 }}>Add</button>
         </div>
       </div>
+    </Wrap>
+  );
 
-      {/* hero ridge across the floor of the screen */}
-      <div style={{ position:"absolute", left:0, right:0, bottom:0, height:"clamp(180px,28vh,300px)", pointerEvents:"none" }}>
-        <FrostMountains height="100%" animateOnce/>
-        <div style={{ position:"absolute", inset:0, background:`linear-gradient(180deg, transparent 40%, ${C.abyss} 100%)` }}/>
+  const Setup = () => (
+    <Wrap>
+      <div style={{ fontFamily:F, fontWeight:600, fontSize:20, letterSpacing:1, color:P.frost, marginBottom:6 }}>Setup · Address Book</div>
+      <div style={{ fontSize:12.5, color:P.dim, marginBottom:18 }}>Technicians on your team and the stores they cover — the universal list everything else pulls from.</div>
+      <div style={{ ...card, padding:15, marginBottom:16 }}>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:P.frost, letterSpacing:1, marginBottom:12 }}>TECHNICIANS · {techs.length}</div>
+        {techs.map(t=>(
+          <div key={t.id} style={{ display:"flex", alignItems:"center", gap:11, padding:"8px 0", borderTop:`1px solid ${P.line}` }}>
+            <div style={{ width:34, height:34, borderRadius:"50%", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, fontWeight:600, color:P.bg0, background:`linear-gradient(135deg, ${t.tint}, ${P.pink})` }}>{t.initials}</div>
+            <div style={{ flex:1, minWidth:0 }}><div style={{ fontFamily:F, fontWeight:600, color:P.frost }}>{t.name}</div><div style={{ fontSize:11.5, color:P.dim }}>{t.role} · {t.email}</div></div>
+          </div>
+        ))}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:9, marginTop:14 }}>
+          <div><label style={lbl}>Name</label><input value={newTech.name} onChange={e=>setNewTech(f=>({...f,name:e.target.value}))} style={inp}/></div>
+          <div><label style={lbl}>Role</label><input value={newTech.role} onChange={e=>setNewTech(f=>({...f,role:e.target.value}))} style={inp}/></div>
+          <div style={{ gridColumn:"1 / -1" }}><label style={lbl}>Email</label><input value={newTech.email} onChange={e=>setNewTech(f=>({...f,email:e.target.value}))} style={inp}/></div>
+        </div>
+        <button onClick={()=>{ if(!newTech.name.trim()) return; const init=newTech.name.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase(); setTechs(p=>[...p,{ id:"t"+Date.now(), ...newTech, initials:init, tint:[P.cyan,P.violet,P.magenta,P.sky][p.length%4] }]); setNewTech({name:"",role:"",email:""}); }} style={{ ...primary, marginTop:12, width:"100%" }}>+ Add technician</button>
       </div>
+      <div style={{ ...card, padding:15 }}>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:P.frost, letterSpacing:1, marginBottom:12 }}>STORES · {stores.length}</div>
+        {stores.map(s=>(
+          <div key={s.id} style={{ padding:"8px 0", borderTop:`1px solid ${P.line}` }}>
+            <div style={{ fontFamily:F, fontWeight:600, color:P.frost }}>{s.name} <span style={{ color:P.dim, fontSize:12 }}>{s.number}</span></div>
+            <div style={{ fontSize:11.5, color:P.dim }}>{s.address}{s.phone?` · ${s.phone}`:""}</div>
+          </div>
+        ))}
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:9, marginTop:14 }}>
+          <div><label style={lbl}>Store #</label><input value={newStore.number} onChange={e=>setNewStore(f=>({...f,number:e.target.value}))} placeholder="#0312" style={inp}/></div>
+          <div><label style={lbl}>Name</label><input value={newStore.name} onChange={e=>setNewStore(f=>({...f,name:e.target.value}))} style={inp}/></div>
+          <div style={{ gridColumn:"1 / -1" }}><label style={lbl}>Address</label><input value={newStore.address} onChange={e=>setNewStore(f=>({...f,address:e.target.value}))} style={inp}/></div>
+          <div style={{ gridColumn:"1 / -1" }}><label style={lbl}>Phone</label><input value={newStore.phone} onChange={e=>setNewStore(f=>({...f,phone:e.target.value}))} placeholder="(303) 555-0000" style={inp}/></div>
+        </div>
+        <button onClick={()=>{ if(!newStore.name.trim()) return; setStores(p=>[...p,{ id:Date.now(), number:newStore.number||"#—", name:newStore.name, address:newStore.address, phone:newStore.phone, overnight:0, racks:[], rtus:[] }]); setNewStore({number:"",name:"",address:"",phone:""}); }} style={{ ...primary, marginTop:12, width:"100%" }}>+ Add store</button>
+      </div>
+    </Wrap>
+  );
+
+  const screen = node.screen==="home" ? Home() : node.screen==="store" ? Store() : node.screen==="rack" ? Rack() : node.screen==="case" ? Case() : node.screen==="rtu" ? Rtu() : node.screen==="notifications" ? Notifications() : node.screen==="truck" ? TruckStock() : node.screen==="setup" ? Setup() : Home();
+
+  return (
+    <div style={{ minHeight:"100vh", background:`radial-gradient(130% 90% at 80% -10%, #1A0E2E 0%, ${P.bg1} 45%, ${P.bg0} 100%)`, color:P.txt, fontFamily:FB, position:"relative", overflow:"hidden" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+        .glow{ transition:transform .16s, box-shadow .16s; } .glow:hover{ transform:translateY(-2px); box-shadow:0 0 0 1px ${P.violet}88, 0 10px 26px -10px ${P.magenta}66; }
+        ::-webkit-scrollbar{ width:9px; } ::-webkit-scrollbar-thumb{ background:${P.line}; border-radius:8px; }
+        @keyframes orbpulse{ 0%,100%{ box-shadow:0 0 0 0 ${P.magenta}55, 0 8px 30px -6px ${P.magenta}; } 50%{ box-shadow:0 0 0 10px ${P.magenta}00, 0 8px 30px -6px ${P.magenta}; } }
+        @keyframes blink{ 0%,80%,100%{ opacity:.25; } 40%{ opacity:1; } }
+        .tdot{ width:6px; height:6px; border-radius:50%; background:${P.pink}; display:inline-block; margin-right:4px; animation:blink 1.2s infinite; }`}</style>
+      <DotWave/>
+      <div style={{ position:"relative", zIndex:1 }}>
+        <div style={{ position:"sticky", top:0, zIndex:20, height:54, display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 14px", background:"rgba(10,8,22,.72)", backdropFilter:"blur(12px)", borderBottom:`1px solid ${P.line}` }}>
+          <div style={{ position:"absolute", left:0, right:0, top:0, height:2, background:`linear-gradient(90deg, ${P.blue}, ${P.violet}, ${P.magenta})` }}/>
+          <button onClick={()=>setDrawer(true)} style={{ background:"none", border:"none", cursor:"pointer", padding:8, display:"flex", flexDirection:"column", gap:4 }}>{[0,1,2].map(i=><div key={i} style={{ width:20, height:2, background:P.dim, borderRadius:2 }}/>)}</button>
+          <div onClick={goHome} style={{ cursor:"pointer", fontFamily:F, fontWeight:600, fontSize:15, letterSpacing:2 }}><span style={{ color:P.frost }}>CRYO</span><span style={{ color:P.magenta }}>WATCH</span></div>
+          <button onClick={()=>go({screen:"notifications"})} style={{ background:"none", border:"none", cursor:"pointer", position:"relative", padding:8 }}>
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={P.dim} strokeWidth="2" strokeLinecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            {unread>0 && <span style={{ position:"absolute", top:3, right:3, background:P.magenta, color:"#fff", borderRadius:"50%", width:16, height:16, fontSize:9, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, boxShadow:`0 0 8px ${P.magenta}` }}>{unread}</span>}
+          </button>
+        </div>
+        {screen}
+      </div>
+
+      {/* drawer */}
+      {drawer && (<>
+        <div onClick={()=>setDrawer(false)} style={{ position:"fixed", inset:0, background:"rgba(4,2,10,.6)", zIndex:40 }}/>
+        <div style={{ position:"fixed", top:0, left:0, bottom:0, width:"90%", maxWidth:460, background:P.bg1, borderRight:`1px solid ${P.lineLt}`, zIndex:50, padding:"18px 16px", overflowY:"auto", boxShadow:`0 0 60px ${P.magenta}22` }}>
+          <div style={{ display:"flex", alignItems:"center", gap:11, paddingBottom:16, borderBottom:`1px solid ${P.line}`, marginBottom:14 }}>
+            <div style={{ width:42, height:42, borderRadius:"50%", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, fontWeight:600, fontSize:15, color:P.bg0, background:`linear-gradient(135deg, ${user.tint}, ${P.pink})` }}>{user.initials}</div>
+            <div style={{ flex:1, minWidth:0 }}><div style={{ fontFamily:F, fontWeight:600, color:P.frost }}>{user.name}</div><div style={{ fontSize:11.5, color:P.dim }}>{user.role}</div></div>
+            <button onClick={()=>{ setUser(null); setDrawer(false); }} style={seg(false)}>Switch</button>
+          </div>
+          {[["All stores", goHome],["Ask Cryo", ()=>{ setCryoOpen(true); setDrawer(false); }],["Notifications", ()=>{ go({screen:"notifications"}); setDrawer(false); }],["Truck stock", ()=>{ go({screen:"truck"}); setDrawer(false); }],["Setup · Techs & stores", ()=>{ go({screen:"setup"}); setDrawer(false); }]].map(([t,fn])=>(
+            <button key={t} onClick={fn} style={{ ...ghost, width:"100%", textAlign:"left", marginBottom:8, padding:"12px 14px" }}>{t}</button>
+          ))}
+          <div style={{ fontFamily:F, fontSize:11, letterSpacing:2, color:P.pewter, margin:"16px 4px 10px" }}>JUMP TO STORE</div>
+          {stores.map(s=>(
+            <button key={s.id} onClick={()=>{ setStack([{screen:"home"},{screen:"store",storeId:s.id}]); setDrawer(false); }} style={{ ...ghost, width:"100%", textAlign:"left", marginBottom:7, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <span>{s.name} <span style={{ color:P.dim, fontSize:11 }}>{s.number}</span></span>{flags(s).crit>0 && <Dot s="crit"/>}
+            </button>
+          ))}
+        </div>
+      </>)}
+
+      {/* Cryo floating orb */}
+      {!cryoOpen && (
+        <button onClick={()=>setCryoOpen(true)} aria-label="Ask Cryo" style={{ position:"fixed", right:18, bottom:20, zIndex:35, display:"flex", alignItems:"center", gap:10, background:"none", border:"none", cursor:"pointer" }}>
+          <span style={{ fontFamily:F, fontWeight:600, letterSpacing:.5, fontSize:13, color:P.frost, background:"rgba(10,8,22,.7)", border:`1px solid ${P.line}`, borderRadius:999, padding:"7px 13px", backdropFilter:"blur(8px)" }}>Ask&nbsp;Cryo</span>
+          <span style={{ width:58, height:58, borderRadius:"50%", background:`conic-gradient(from 0deg, ${P.blue}, ${P.violet}, ${P.magenta}, ${P.cyan}, ${P.blue})`, display:"flex", alignItems:"center", justifyContent:"center", animation:"orbpulse 2.4s ease-in-out infinite" }}>
+            <span style={{ width:24, height:24, borderRadius:"50%", background:P.bg0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, color:P.frost, fontWeight:700, fontSize:13 }}>C</span>
+          </span>
+        </button>
+      )}
+
+      {/* Cryo panel */}
+      {cryoOpen && (<>
+        <div onClick={()=>setCryoOpen(false)} style={{ position:"fixed", inset:0, background:"rgba(4,2,10,.55)", zIndex:60 }}/>
+        <div style={{ position:"fixed", right:0, left:0, bottom:0, zIndex:70, margin:"0 auto", maxWidth:520, background:P.bg1, borderTop:`1px solid ${P.lineLt}`, borderRadius:"18px 18px 0 0", boxShadow:`0 -20px 60px -20px #000`, display:"flex", flexDirection:"column", maxHeight:"80vh" }}>
+          <div style={{ height:3, background:`linear-gradient(90deg, ${P.blue}, ${P.violet}, ${P.magenta})`, borderRadius:"18px 18px 0 0" }}/>
+          <div style={{ display:"flex", alignItems:"center", gap:11, padding:"14px 16px", borderBottom:`1px solid ${P.line}` }}>
+            <CryoMark size={32}/>
+            <div style={{ flex:1 }}><div style={{ fontFamily:F, fontWeight:600, fontSize:15, letterSpacing:1, color:P.frost }}>CRYO</div><div style={{ fontSize:11, color:P.cyan }}>AI tech assistant · refrigeration expert</div></div>
+            <button onClick={()=>setCryoOpen(false)} style={seg(false)}>Close</button>
+          </div>
+          <div style={{ flex:1, overflowY:"auto", padding:"14px 16px", display:"flex", flexDirection:"column", gap:10 }}>
+            {chat.map((m,i)=>(
+              <div key={i} style={{ display:"flex", justifyContent:m.role==="user"?"flex-end":"flex-start" }}>
+                <div style={{ maxWidth:"82%" }}>
+                  <div style={{ whiteSpace:"pre-line", fontSize:13.5, lineHeight:1.5, padding:"10px 13px", borderRadius:13, background:m.role==="user"?P.panel2:`linear-gradient(180deg, ${P.violet}1F, ${P.panel})`, border:`1px solid ${m.role==="user"?P.line:P.violet+"55"}`, color:P.txt }}>{m.text}</div>
+                  {m.action && <button onClick={()=>{ go(m.action.node); setCryoOpen(false); }} style={{ ...primary, marginTop:7 }}>{m.action.label} →</button>}
+                </div>
+              </div>
+            ))}
+            {thinking && <div style={{ fontSize:13, color:P.pink, padding:"4px 2px" }}><span className="tdot"/><span className="tdot" style={{ animationDelay:".2s" }}/><span className="tdot" style={{ animationDelay:".4s" }}/> Cryo is thinking…</div>}
+          </div>
+          <div style={{ padding:"10px 12px", borderTop:`1px solid ${P.line}` }}>
+            <div style={{ display:"flex", gap:7, overflowX:"auto", paddingBottom:9 }}>
+              {SUGGEST.map(s=><button key={s} onClick={()=>send(s)} style={{ ...seg(false), whiteSpace:"nowrap", flexShrink:0 }}>{s}</button>)}
+            </div>
+            <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+              <button onClick={mic} aria-label="Voice" style={{ ...ghost, padding:"9px 11px", display:"flex", alignItems:"center" }}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={P.cyan} strokeWidth="2" strokeLinecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+              <input value={chatIn} onChange={e=>setChatIn(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") send(); }} placeholder="Ask Cryo anything…" style={{ ...inp, flex:1 }}/>
+              <button onClick={()=>send()} style={primary}>Send</button>
+            </div>
+          </div>
+        </div>
+      </>)}
     </div>
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════
-//  MAIN APP
-// ═══════════════════════════════════════════════════════════════════════════════════
-export default function App() {
-  const [user, setUser] = useState(null);
+function Wrap({ children }){ return <div style={{ maxWidth:860, margin:"0 auto", padding:"14px 14px 48px" }}>{children}</div>; }
+function Crumb({ path, onBack }){ return (
+  <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+    <button onClick={onBack} style={{ background:P.panel, border:`1px solid ${P.line}`, color:P.txt, borderRadius:RB, padding:"6px 11px", cursor:"pointer", fontFamily:F }}>←</button>
+    <div style={{ fontSize:11.5, color:P.dim, fontFamily:F, letterSpacing:.5 }}>{path.map((p,i)=><span key={i}>{i>0&&<span style={{ color:P.line }}> › </span>}<span style={{ color:i===path.length-1?P.magenta:P.cyan }}>{p}</span></span>)}</div>
+  </div>
+); }
 
-  const [stores]            = useState(DEFAULT_STORES);
-  const [issues, setIssues] = useState(SEED_ISSUES);
-  const [cNotes, setCNotes] = useState(SEED_CIRCUIT_NOTES);
-
-  const [screen,        setScreen]        = useState("dashboard");
-  const [drawerOpen,    setDrawerOpen]    = useState(false);
-  const [activeStoreId, setActiveStoreId] = useState(null);
-  const [dashTab,       setDashTab]       = useState("overnight");
-
-  const [showIssueForm,  setShowIssueForm]  = useState(false);
-  const [issueForm,      setIssueForm]      = useState({});
-  const [editingIssueId, setEditingIssueId] = useState(null);
-  const [expandedId,     setExpandedId]     = useState(null);
-
-  const [circuitFilter, setCircuitFilter] = useState("all");
-  const [systemFilter,  setSystemFilter]  = useState("all");
-  const [circuitSearch, setCircuitSearch] = useState("");
-
-  const [noteModal,    setNoteModal]    = useState(null);
-  const [noteForm,     setNoteForm]     = useState({});
-  const [expandedNote, setExpandedNote] = useState(null);
-
-  const [journalTab, setJournalTab] = useState("journal");
-
-  if (!user) {
-    return (<><GlobalStyle/><Login onSelect={u=>{ setUser(u); setScreen("dashboard"); }}/></>);
-  }
-
-  const activeStore = stores.find(s=>s.id===activeStoreId);
-  const alarmCount  = issues.filter(i=>i.urgency==="Today"||i.type==="Alarm").length;
-
-  const overnightIssues = issues.filter(i=>i.overnight&&i.urgency!=="Resolved");
-  const todayIssues     = issues.filter(i=>i.urgency==="Today");
-  const weekIssues      = issues.filter(i=>i.urgency==="This Week");
-  const tabIssues       = dashTab==="overnight"?overnightIssues:dashTab==="today"?todayIssues:weekIssues;
-
-  const storePatterns   = activeStore ? detectPatterns(cNotes, activeStore.id) : [];
-  const resolvedNoNotes = activeStore ? findResolvedWithoutNotes(issues, cNotes, activeStore.id) : [];
-  const storeCNotes     = activeStore ? cNotes.filter(n=>n.storeId===activeStore.id).sort((a,b)=>b.id-a.id) : [];
-
-  const openNewIssue = (circuit=null) => {
-    const sid   = activeStoreId||89;
-    const store = stores.find(s=>s.id===sid);
-    setEditingIssueId(null);
-    setIssueForm({ storeId:sid, type:"Alarm", urgency:"Today", controllerName:store?.controllers[0]?.name||"", circuit:circuit?.name||"", description:"", riskScore:5, notes:"", overnight:true });
-    setShowIssueForm(true);
-  };
-  const saveIssue = () => {
-    if (!issueForm.circuit?.trim()||!issueForm.description?.trim()) return;
-    if (editingIssueId) setIssues(p=>p.map(i=>i.id===editingIssueId?{...issueForm,id:editingIssueId}:i));
-    else setIssues(p=>[...p,{...issueForm,id:nextIssueId++,createdAt:nowStr(),autoLogged:false}]);
-    setShowIssueForm(false);
-  };
-  const deleteIssue   = id => setIssues(p=>p.filter(i=>i.id!==id));
-  const updateUrgency = (id,u) => setIssues(p=>p.map(i=>i.id===id?{...i,urgency:u}:i));
-
-  const openNoteModal = (circuitId, circuitName) => {
-    setNoteModal({ circuitId, circuitName });
-    setNoteForm({ type:"observation", text:"", tech:user.initials||"", date:nowStr(), time:nowTime(), shift:shiftOf() });
-  };
-  const saveNote = () => {
-    if (!noteForm.text?.trim()) return;
-    setCNotes(p=>[...p,{ id:nextNoteId++, storeId:activeStoreId, circuitId:noteModal.circuitId, ...noteForm }]);
-    setNoteModal(null);
-  };
-  const deleteNote = id => setCNotes(p=>p.filter(n=>n.id!==id));
-
-  const circuitNoteCount    = circId => cNotes.filter(n=>n.storeId===activeStoreId&&n.circuitId===circId).length;
-  const circuitHasOpenIssue = circId => issues.some(i=>i.storeId===activeStoreId&&i.urgency!=="Resolved"&&(i.circuit?.includes(circId)));
-
-  const filteredCircuits = (store) => {
-    if (!store?.circuits) return [];
-    return store.circuits.filter(c => {
-      if (circuitFilter!=="all"&&c.status!==circuitFilter) return false;
-      if (systemFilter!=="all"&&c.system!==systemFilter) return false;
-      if (circuitSearch&&!c.name.toLowerCase().includes(circuitSearch.toLowerCase())&&!c.area.toLowerCase().includes(circuitSearch.toLowerCase())) return false;
-      return true;
-    });
-  };
-  const systems = activeStore ? [...new Set(activeStore.circuits?.map(c=>c.system)||[])] : [];
-
-  // ── Circuit card ──────────────────────────────────────────────────────────────
-  function CircuitCard({ c }) {
-    const accent = c.status==="crit"?C.crit:c.status==="warn"?C.orange:C.ice;
-    const hasIssue   = circuitHasOpenIssue(c.id);
-    const noteCount  = circuitNoteCount(c.id);
-    const latestNote = cNotes.filter(n=>n.storeId===activeStoreId&&n.circuitId===c.id).sort((a,b)=>b.id-a.id)[0];
-    return (
-      <div className="cw-card-lift cw-metal" style={{ border:`1px solid ${C.line}`, borderLeft:`3px solid ${accent}`, borderRadius:12, padding:13, boxShadow:"0 6px 16px -12px #000c, inset 0 1px 0 rgba(255,255,255,.04)" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:6 }}>
-          <div style={{ flex:1, minWidth:0, marginRight:8 }}>
-            <div style={{ fontFamily:F, fontWeight:600, fontSize:14, letterSpacing:.5, color:c.status==="ok"?C.frost:accent, lineHeight:1.2, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{c.name}</div>
-            <div style={{ fontSize:11, color:C.dim, marginTop:2 }}>{c.area} · {c.type}</div>
-          </div>
-          <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:4, flexShrink:0 }}>
-            <StatusDot status={c.status}/>
-            {!c.defrostOk && <span style={{ fontSize:9, color:C.orange, fontFamily:F, fontWeight:600, background:C.orange+"1A", border:`1px solid ${C.orange}55`, borderRadius:4, padding:"1px 6px", letterSpacing:.5 }}>DEFROST ⚠</span>}
-          </div>
-        </div>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
-          <span style={{ fontFamily:FM, fontSize:24, fontWeight:700, color:c.status==="crit"?C.crit:c.status==="warn"?C.orange:C.ice, letterSpacing:-1 }}>{c.currentTemp}°<span style={{ fontSize:13, opacity:.6 }}>F</span></span>
-          <span style={{ fontSize:11, color:C.dim, fontFamily:FM }}>{c.setpointLow}° – {c.setpointHigh}°</span>
-        </div>
-        <TempBar current={c.currentTemp} low={c.setpointLow} high={c.setpointHigh} status={c.status}/>
-        {latestNote && (
-          <div style={{ marginTop:9, background:"#0A1A28", borderRadius:7, padding:"6px 9px", borderLeft:`2px solid ${(NOTE_TYPES.find(t=>t.id===latestNote.type)||NOTE_TYPES[0]).color}` }}>
-            <div style={{ fontSize:10, color:C.dim, marginBottom:2, fontFamily:F, letterSpacing:.5 }}>{latestNote.date} {latestNote.time} · <ShiftBadge shift={latestNote.shift}/></div>
-            <div style={{ fontSize:11.5, color:C.aluminum, lineHeight:1.45 }}>{latestNote.text.length>80?latestNote.text.slice(0,80)+"…":latestNote.text}</div>
-          </div>
-        )}
-        <div style={{ marginTop:9, display:"flex", gap:6, flexWrap:"wrap" }}>
-          <button onClick={()=>openNoteModal(c.id,c.name)} style={{ flex:1, background:"#0A1A28", border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:7, padding:"6px 0", fontSize:11.5, cursor:"pointer", fontFamily:F, letterSpacing:.5 }}>+ Note {noteCount>0?`(${noteCount})`:""}</button>
-          <button onClick={()=>openNewIssue(c)} style={{ flex:1, background:"#0A1A28", border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:7, padding:"6px 0", fontSize:11.5, cursor:"pointer", fontFamily:F, letterSpacing:.5 }}>+ Issue</button>
-          {hasIssue && <span style={{ fontSize:10, color:C.crit, fontFamily:F, fontWeight:700, alignSelf:"center", letterSpacing:.5 }}>● OPEN</span>}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Issue row ─────────────────────────────────────────────────────────────────
-  function IssueRow({ issue }) {
-    const sc    = getColor(issue.storeId);
-    const store = stores.find(s=>s.id===issue.storeId);
-    const ucfg  = URGENCY[issue.urgency];
-    const exp   = expandedId===issue.id;
-    const riskCol = issue.riskScore>=7?C.crit:issue.riskScore>=5?C.orange:C.ice;
-    return (
-      <div className="cw-metal" style={{ border:`1px solid ${exp?ucfg.border:C.line}`, borderLeft:`4px solid ${sc.main}`, borderRadius:12, overflow:"hidden", marginBottom:9, boxShadow:"0 6px 16px -12px #000c" }}>
-        <div onClick={()=>setExpandedId(exp?null:issue.id)} style={{ padding:"13px 15px", cursor:"pointer", display:"flex", gap:12, alignItems:"flex-start" }}>
-          <div style={{ minWidth:38, height:38, borderRadius:9, background:riskCol+"18", border:`1px solid ${riskCol}55`, display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:17, fontFamily:FM, color:riskCol, flexShrink:0 }}>{issue.riskScore}</div>
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ display:"flex", gap:7, flexWrap:"wrap", alignItems:"center", marginBottom:3 }}>
-              <span style={{ color:sc.main, fontFamily:F, fontWeight:600, fontSize:13, letterSpacing:.5 }}>{store?.name}</span>
-              <span style={{ color:C.dim, fontSize:12 }}>·</span>
-              <span style={{ color:TYPE_COLOR[issue.type], fontSize:12, fontWeight:600 }}>{TYPE_ICON[issue.type]} {issue.type}</span>
-              <span style={{ color:C.dim, fontSize:12 }}>· {issue.controllerName}</span>
-              {issue.autoLogged && <span style={{ background:C.glacier, color:C.abyss, borderRadius:5, padding:"1px 6px", fontSize:10, fontWeight:700, fontFamily:F, letterSpacing:.5 }}>⚡ AI</span>}
-            </div>
-            <div style={{ fontFamily:F, fontWeight:600, fontSize:15, letterSpacing:.5, color:C.frost, marginBottom:2 }}>{issue.circuit}</div>
-            <div style={{ color:C.dim, fontSize:12.5, lineHeight:1.5 }}>{issue.description}</div>
-          </div>
-          <span style={{ color:C.dim, fontSize:16, flexShrink:0 }}>{exp?"∧":"∨"}</span>
-        </div>
-        {exp && (
-          <div style={{ borderTop:`1px solid ${C.line}`, padding:"11px 15px", background:"#0A1A28" }}>
-            {issue.notes && <div style={{ background:C.steel, border:`1px solid ${C.line}`, borderRadius:7, padding:"8px 11px", marginBottom:10, fontSize:12, color:C.aluminum }}><span style={{ color:C.pewter, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:1 }}>Notes: </span>{issue.notes}</div>}
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
-              <span style={{ color:C.dim, fontSize:12 }}>Move:</span>
-              {["Today","This Week","Watch List","Resolved"].filter(u=>u!==issue.urgency).map(u=>(
-                <button key={u} onClick={()=>updateUrgency(issue.id,u)} style={{ background:URGENCY[u].bg, border:`1px solid ${URGENCY[u].border}`, color:URGENCY[u].color, borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontWeight:700, fontFamily:F, letterSpacing:.5 }}>{URGENCY[u].label}</button>
-              ))}
-              <div style={{ flex:1 }}/>
-              <button onClick={()=>{setEditingIssueId(issue.id);setIssueForm({...issue});setShowIssueForm(true);}} style={{ background:C.steel, border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontFamily:F }}>Edit</button>
-              <button onClick={()=>deleteIssue(issue.id)} style={{ background:C.crit+"18", border:`1px solid ${C.crit}55`, color:C.crit, borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontFamily:F }}>Delete</button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ── Pattern card ─────────────────────────────────────────────────────────────
-  function PatternCard({ p }) {
-    const color = p.severity==="crit"?C.crit:p.severity==="warn"?C.orange:C.ice;
-    return (
-      <div className="cw-metal" style={{ border:`1px solid ${color}55`, borderLeft:`3px solid ${color}`, borderRadius:12, padding:15, marginBottom:11 }}>
-        <div style={{ display:"flex", gap:9, alignItems:"center", marginBottom:6 }}>
-          <span style={{ fontSize:18 }}>{p.icon}</span>
-          <span style={{ fontFamily:F, fontWeight:600, fontSize:16, color, letterSpacing:.5 }}>{p.title}</span>
-        </div>
-        <p style={{ fontSize:13, color:C.aluminum, margin:"0 0 9px 0", lineHeight:1.55 }}>{p.body}</p>
-        <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-          {p.circuits.map(cid=>(
-            <span key={cid} style={{ background:color+"1A", border:`1px solid ${color}55`, color, borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700, fontFamily:FM }}>{cid}</span>
+function Login({ techs, onPick }){
+  return (
+    <div style={{ minHeight:"100vh", background:`radial-gradient(130% 90% at 80% -10%, #1A0E2E 0%, ${P.bg1} 45%, ${P.bg0} 100%)`, color:P.txt, fontFamily:FB, position:"relative", overflow:"hidden" }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;400;500;600;700&family=Inter:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');`}</style>
+      <DotWave/>
+      <div style={{ position:"relative", zIndex:1, maxWidth:560, margin:"0 auto", padding:"clamp(50px,12vh,120px) 20px 0", textAlign:"center" }}>
+        <div style={{ fontFamily:F, fontWeight:600, fontSize:42, letterSpacing:3, marginBottom:8 }}><span style={{ color:P.frost }}>CRYO</span><span style={{ color:P.magenta }}>WATCH</span></div>
+        <p style={{ color:P.dim, fontSize:15, marginBottom:34 }}>Sign in to load your stores. <span style={{ color:P.pewter }}>(Demo — pick a profile; real email/password comes with the backend.)</span></p>
+        <div style={{ display:"grid", gap:12 }}>
+          {techs.map(t=>(
+            <button key={t.id} onClick={()=>onPick(t)} className="glow" style={{ ...card, display:"flex", alignItems:"center", gap:14, padding:"15px 16px", cursor:"pointer", textAlign:"left", color:P.txt }}>
+              <div style={{ width:46, height:46, borderRadius:"50%", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, fontWeight:600, fontSize:17, color:P.bg0, background:`linear-gradient(135deg, ${t.tint}, ${P.pink})` }}>{t.initials}</div>
+              <div><div style={{ fontFamily:F, fontWeight:600, fontSize:17, color:P.frost, letterSpacing:.5 }}>{t.name}</div><div style={{ fontSize:12, color:P.dim }}>{t.role}</div></div>
+            </button>
           ))}
         </div>
       </div>
-    );
-  }
-
-  // ── Journal entry ──────────────────────────────────────────────────────────────
-  function JournalEntry({ note }) {
-    const nt  = NOTE_TYPES.find(t=>t.id===note.type)||NOTE_TYPES[NOTE_TYPES.length-1];
-    const exp = expandedNote===note.id;
-    const circuit = activeStore?.circuits?.find(c=>c.id===note.circuitId);
-    return (
-      <div className="cw-metal" style={{ border:`1px solid ${C.line}`, borderLeft:`3px solid ${nt.color}`, borderRadius:12, marginBottom:9, overflow:"hidden" }}>
-        <div onClick={()=>setExpandedNote(exp?null:note.id)} style={{ padding:"11px 15px", cursor:"pointer" }}>
-          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:8 }}>
-            <div style={{ flex:1, minWidth:0 }}>
-              <div style={{ display:"flex", gap:7, flexWrap:"wrap", alignItems:"center", marginBottom:4 }}>
-                <NoteTypeBadge type={note.type}/>
-                <span style={{ color:C.dim, fontSize:11, fontFamily:FM }}>{note.date} {note.time}</span>
-                <ShiftBadge shift={note.shift}/>
-                {note.tech&&<span style={{ color:C.ice, fontSize:11 }}>· {note.tech}</span>}
-              </div>
-              <div style={{ fontFamily:F, fontWeight:600, fontSize:14, letterSpacing:.5, color:C.frost }}>{note.circuitId} {circuit?`— ${circuit.area}`:""}</div>
-              <div style={{ fontSize:12, color:C.aluminum, marginTop:3, lineHeight:1.45 }}>{exp?note.text:note.text.slice(0,100)+(note.text.length>100?"…":"")}</div>
-            </div>
-            <span style={{ color:C.dim, fontSize:14, flexShrink:0 }}>{exp?"∧":"∨"}</span>
-          </div>
-        </div>
-        {exp && (
-          <div style={{ borderTop:`1px solid ${C.line}`, padding:"9px 15px", background:"#0A1A28", display:"flex", justifyContent:"flex-end" }}>
-            <button onClick={()=>deleteNote(note.id)} style={{ background:C.crit+"18", border:`1px solid ${C.crit}55`, color:C.crit, borderRadius:6, padding:"4px 10px", fontSize:11, cursor:"pointer", fontFamily:F }}>Delete</button>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ── Render ──────────────────────────────────────────────────────────────────────
-  return (
-    <div style={{ minHeight:"100vh", background:`radial-gradient(140% 80% at 50% -20%, #112C42 0%, ${C.abyss} 60%)`, color:C.txt, fontFamily:FB, fontSize:14, position:"relative" }}>
-      <GlobalStyle/>
-
-      {/* HEADER — frosted glass with a hairline red banner accent */}
-      <div className="cw-sheen" style={{ position:"fixed", top:0, left:0, right:0, height:56, background:"rgba(11,28,42,.82)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)", borderBottom:`1px solid ${C.line}`, display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 14px", zIndex:200 }}>
-        <div style={{ position:"absolute", top:0, left:0, right:0, height:2, background:C.red, opacity:.85 }}/>
-        <button onClick={()=>setDrawerOpen(true)} style={{ background:"none", border:"none", cursor:"pointer", padding:8, display:"flex", flexDirection:"column", gap:5 }}>
-          {[0,1,2].map(i=><div key={i} style={{ width:20, height:2, background:C.aluminum, borderRadius:2 }}/>)}
-        </button>
-        <div style={{ textAlign:"center" }}>
-          {screen==="store"&&activeStore
-            ? <><div style={{ fontFamily:F, fontWeight:600, fontSize:16, letterSpacing:1, color:getColor(activeStore.id).main }}>{activeStore.name}</div>
-               <div style={{ fontSize:10, color:C.dim, letterSpacing:.5 }}>{activeStore.brand} · {activeStore.refrigerant}</div></>
-            : screen==="journal"&&activeStore
-            ? <div style={{ fontFamily:F, fontWeight:600, fontSize:16, letterSpacing:1, color:C.ice }}>JOURNAL · {activeStore.name}</div>
-            : <Wordmark size={17}/>
-          }
-        </div>
-        <button onClick={()=>setScreen("dashboard")} style={{ background:"none", border:"none", cursor:"pointer", position:"relative", padding:8 }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.aluminum} strokeWidth="2" strokeLinecap="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-          {alarmCount>0&&<span style={{ position:"absolute", top:3, right:3, background:C.red, color:"#fff", borderRadius:"50%", width:15, height:15, fontSize:9, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F }}>{alarmCount}</span>}
-        </button>
-      </div>
-
-      {/* DRAWER */}
-      {drawerOpen && (
-        <>
-          <div onClick={()=>setDrawerOpen(false)} style={{ position:"fixed", inset:0, background:"rgba(3,10,16,.7)", zIndex:300, backdropFilter:"blur(2px)" }}/>
-          <div style={{ position:"fixed", top:0, left:0, bottom:0, width:300, background:C.deep, borderRight:`1px solid ${C.line}`, zIndex:400, overflowY:"auto", padding:"70px 14px 24px" }}>
-            {/* user chip */}
-            <div className="cw-metal" style={{ display:"flex", alignItems:"center", gap:11, border:`1px solid ${C.line}`, borderRadius:12, padding:"11px 13px", marginBottom:18 }}>
-              <div style={{ width:40, height:40, borderRadius:10, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", fontFamily:F, fontWeight:600, fontSize:16, color:C.abyss, background:`linear-gradient(135deg, ${user.tint}, ${C.chrome})` }}>{user.initials}</div>
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontFamily:F, fontWeight:500, fontSize:15, letterSpacing:.5, color:C.frost }}>{user.name}</div>
-                <div style={{ fontSize:11, color:C.dim }}>{user.region}</div>
-              </div>
-              <button onClick={()=>{ setUser(null); setDrawerOpen(false); }} title="Switch profile" style={{ background:"#0A1A28", border:`1px solid ${C.line}`, color:C.ice, borderRadius:7, padding:"6px 9px", cursor:"pointer", fontFamily:F, fontSize:11, letterSpacing:.5 }}>Switch</button>
-            </div>
-
-            <div style={{ fontFamily:F, fontSize:11, fontWeight:500, letterSpacing:2, color:C.pewter, textTransform:"uppercase", marginBottom:12 }}>Your Stores</div>
-            {stores.map(store => {
-              const sc = getColor(store.id);
-              const todayCount   = issues.filter(i=>i.storeId===store.id&&i.urgency==="Today").length;
-              const critCount    = store.circuits?.filter(c=>c.status==="crit").length||0;
-              const warnCount    = store.circuits?.filter(c=>c.status==="warn").length||0;
-              const journalCount = cNotes.filter(n=>n.storeId===store.id).length;
-              return (
-                <div key={store.id}>
-                  <div onClick={()=>{ setActiveStoreId(store.id); setScreen("store"); setDrawerOpen(false); setCircuitFilter("all"); setSystemFilter("all"); setCircuitSearch(""); }} className="cw-metal" style={{ border:`1px solid ${C.line}`, borderLeft:`4px solid ${sc.main}`, borderRadius:10, padding:"12px 14px", cursor:"pointer", marginBottom:4 }}>
-                    <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                      <div>
-                        <div style={{ fontFamily:F, fontWeight:600, fontSize:17, letterSpacing:1, color:C.frost }}>{store.name}</div>
-                        <div style={{ fontSize:12, color:C.dim }}>{store.location}</div>
-                      </div>
-                      {todayCount>0&&<span style={{ background:C.crit+"18", border:`1px solid ${C.crit}55`, color:C.crit, borderRadius:6, padding:"2px 8px", fontSize:12, fontWeight:700, fontFamily:FM }}>{todayCount}</span>}
-                    </div>
-                    <div style={{ marginTop:8, display:"flex", gap:10, alignItems:"center" }}>
-                      <span style={{ fontSize:12, color:C.dim }}>{store.brand||"—"} · {store.refrigerant||"—"}</span>
-                      {critCount>0&&<span style={{ fontSize:12, color:C.crit }}>⚠ {critCount}</span>}
-                      {warnCount>0&&<span style={{ fontSize:12, color:C.orange }}>! {warnCount}</span>}
-                    </div>
-                    {store.note&&<div style={{ fontSize:11, color:C.ice, marginTop:5 }}>📋 {store.note}</div>}
-                  </div>
-                  {store.circuits?.length>0 && (
-                    <button onClick={()=>{ setActiveStoreId(store.id); setScreen("journal"); setDrawerOpen(false); }} style={{ width:"100%", background:"transparent", border:`1px solid ${C.line}`, borderTop:"none", borderRadius:"0 0 8px 8px", color:C.dim, fontSize:11, padding:"6px 14px", cursor:"pointer", textAlign:"left", fontFamily:F, marginBottom:8, letterSpacing:.5 }}>📓 Journal & Patterns {journalCount>0?`(${journalCount} notes)`:""}</button>
-                  )}
-                </div>
-              );
-            })}
-            <div style={{ marginTop:16, borderTop:`1px solid ${C.line}`, paddingTop:14 }}>
-              <button onClick={()=>{setScreen("dashboard");setDrawerOpen(false);}} className="cw-metal" style={{ border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:9, padding:"10px 16px", cursor:"pointer", fontWeight:600, fontSize:13, fontFamily:F, width:"100%", textAlign:"left", letterSpacing:.5 }}>📊 Dashboard</button>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* MAIN */}
-      <div style={{ paddingTop:56, minHeight:"100vh" }}>
-
-        {/* DASHBOARD */}
-        {screen==="dashboard" && (
-          <div style={{ padding:14, maxWidth:720, margin:"0 auto" }}>
-            <div style={{ display:"flex", gap:9, marginBottom:18, marginTop:8 }}>
-              {[["overnight",overnightIssues.length,"🌙","OVERNIGHT"],["today",todayIssues.length,"🔴","TODAY"],["thisweek",weekIssues.length,"🟡","THIS WEEK"]].map(([tab,count,,label])=>(
-                <div key={tab} onClick={()=>setDashTab(tab)} className={dashTab===tab?"cw-metal":""} style={{ flex:1, background:dashTab===tab?undefined:C.deep, border:`1px solid ${dashTab===tab?C.ice:C.line}`, borderRadius:12, padding:"13px 6px", cursor:"pointer", textAlign:"center", boxShadow: dashTab===tab?`0 0 0 1px ${C.ice}33`:"none" }}>
-                  <div style={{ fontSize:22, fontFamily:FM, fontWeight:700, color:tab==="today"&&count>0?C.crit:tab==="thisweek"&&count>0?C.orange:C.frost }}>{count}</div>
-                  <div style={{ fontSize:10, color:C.dim, fontFamily:F, fontWeight:500, letterSpacing:1.5, marginTop:3 }}>{label}</div>
-                </div>
-              ))}
-            </div>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-              <div style={{ fontFamily:F, fontWeight:600, fontSize:16, letterSpacing:1, color:C.aluminum }}>
-                {dashTab==="overnight"?"🌙 Overnight Flags":dashTab==="today"?"🔴 Act Today":"🟡 This Week"}
-              </div>
-              <button onClick={()=>openNewIssue()} style={{ background:`linear-gradient(135deg, ${C.glacier}, ${C.deepIce})`, border:`1px solid ${C.ice}66`, color:"#fff", borderRadius:8, padding:"7px 15px", cursor:"pointer", fontWeight:600, fontSize:13, fontFamily:F, letterSpacing:.5 }}>+ Log Issue</button>
-            </div>
-            {tabIssues.length===0
-              ? <div style={{ textAlign:"center", color:C.dim, padding:"48px 0" }}><div style={{ fontSize:26, marginBottom:8 }}>✓</div><div>Nothing flagged here — cold and quiet.</div></div>
-              : tabIssues.sort((a,b)=>b.riskScore-a.riskScore).map(issue=><IssueRow key={issue.id} issue={issue}/>)
-            }
-          </div>
-        )}
-
-        {/* STORE CIRCUIT VIEW */}
-        {screen==="store" && activeStore && (
-          <div style={{ padding:14, maxWidth:980, margin:"0 auto" }}>
-            <div className="cw-metal" style={{ border:`1px solid ${C.line}`, borderLeft:`4px solid ${getColor(activeStore.id).main}`, borderRadius:14, padding:15, marginBottom:14, overflow:"hidden", position:"relative" }}>
-              <div style={{ position:"absolute", right:0, bottom:0, width:240, height:80, opacity:.25 }}><FrostMountains height={80} activate/></div>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", flexWrap:"wrap", gap:8, position:"relative" }}>
-                <div>
-                  <div style={{ fontFamily:F, fontWeight:600, fontSize:19, letterSpacing:1, color:C.frost }}>{activeStore.name} — {activeStore.location}</div>
-                  <div style={{ color:C.dim, fontSize:12, marginTop:3 }}>{activeStore.brand} · {activeStore.refrigerant} · {activeStore.controllers.map(c=>c.name).join(", ")}</div>
-                </div>
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  {[["crit",C.crit,"Critical"],["warn",C.orange,"Warning"],["ok",C.green,"OK"]].map(([s,col,l])=>{
-                    const n = activeStore.circuits?.filter(x=>x.status===s).length||0;
-                    return <div key={s} style={{ background:"#0A1A28", border:`1px solid ${C.line}`, borderRadius:9, padding:"6px 11px", textAlign:"center" }}>
-                      <div style={{ color:col, fontFamily:FM, fontWeight:700, fontSize:17 }}>{n}</div>
-                      <div style={{ color:C.dim, fontSize:10, fontFamily:F, fontWeight:500, letterSpacing:1 }}>{l.toUpperCase()}</div>
-                    </div>;
-                  })}
-                  <button onClick={()=>setScreen("journal")} style={{ background:C.ice+"1A", border:`1px solid ${C.ice}55`, color:C.ice, borderRadius:9, padding:"6px 13px", cursor:"pointer", fontFamily:F, fontWeight:600, fontSize:12, letterSpacing:.5 }}>📓 Journal</button>
-                </div>
-              </div>
-              {activeStore.note&&<div style={{ marginTop:9, fontSize:12, color:C.ice, position:"relative" }}>📋 {activeStore.note}</div>}
-            </div>
-
-            {storePatterns.length>0 && (
-              <div style={{ background:C.orange+"14", border:`1px solid ${C.orange}44`, borderRadius:12, padding:"11px 15px", marginBottom:14 }}>
-                <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:C.orange, marginBottom:8, letterSpacing:.5 }}>⚠ {storePatterns.length} SYSTEM PATTERN{storePatterns.length>1?"S":""} DETECTED</div>
-                {storePatterns.map((p,i)=>(
-                  <div key={i} style={{ fontSize:12, color:C.aluminum, marginBottom:4 }}><span style={{ marginRight:6 }}>{p.icon}</span><strong style={{ color:p.severity==="crit"?C.crit:C.orange }}>{p.title}:</strong> {p.body.slice(0,90)}… <button onClick={()=>setScreen("journal")} style={{ background:"none", border:"none", color:C.ice, cursor:"pointer", fontSize:11, fontFamily:F }}>View →</button></div>
-                ))}
-              </div>
-            )}
-
-            {resolvedNoNotes.length>0 && (
-              <div style={{ background:C.ice+"12", border:`1px solid ${C.ice}44`, borderRadius:12, padding:"11px 15px", marginBottom:14 }}>
-                <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:C.ice, marginBottom:6, letterSpacing:.5 }}>📋 {resolvedNoNotes.length} RESOLVED ISSUE{resolvedNoNotes.length>1?"S":""} WITH NO TECH NOTE</div>
-                {resolvedNoNotes.map(r=>(
-                  <div key={r.id} style={{ fontSize:12, color:C.dim, marginBottom:3 }}>· {r.circuit} — resolved {r.createdAt} but no emergency/PM note logged. <button onClick={()=>openNoteModal(r.circuit?.split(" ")[0],r.circuit)} style={{ background:"none", border:"none", color:C.ice, cursor:"pointer", fontSize:11, fontFamily:F }}>Add note →</button></div>
-                ))}
-              </div>
-            )}
-
-            {/* Filters */}
-            <div style={{ display:"flex", gap:8, marginBottom:12, flexWrap:"wrap", alignItems:"center" }}>
-              <input placeholder="Search circuit or area…" value={circuitSearch} onChange={e=>setCircuitSearch(e.target.value)} style={{ ...inp, width:190, padding:"7px 11px", fontSize:12 }}/>
-              <div style={{ display:"flex", gap:6 }}>
-                {["all","crit","warn","ok"].map(f=>{
-                  const colors={all:C.aluminum,crit:C.crit,warn:C.orange,ok:C.green};
-                  return <button key={f} onClick={()=>setCircuitFilter(f)} style={{ background:circuitFilter===f?C.steel2:"transparent", border:`1px solid ${circuitFilter===f?colors[f]:C.line}`, color:circuitFilter===f?colors[f]:C.dim, borderRadius:7, padding:"5px 11px", fontSize:12, cursor:"pointer", fontFamily:F, fontWeight:600, textTransform:"uppercase", letterSpacing:.5 }}>{f}</button>;
-                })}
-              </div>
-              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                {["all",...systems].map(s=>(
-                  <button key={s} onClick={()=>setSystemFilter(s)} style={{ background:systemFilter===s?C.steel2:"transparent", border:`1px solid ${systemFilter===s?getColor(activeStore.id).main:C.line}`, color:systemFilter===s?getColor(activeStore.id).main:C.dim, borderRadius:7, padding:"5px 11px", fontSize:12, cursor:"pointer", fontFamily:F, letterSpacing:.5 }}>
-                    {s==="all"?"All":s==="SC"?"Self-Cont.":`Sys ${s}`}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(255px,1fr))", gap:11 }}>
-              {filteredCircuits(activeStore).map(c=><CircuitCard key={c.id} c={c}/>)}
-            </div>
-            {filteredCircuits(activeStore).length===0&&(
-              <div style={{ textAlign:"center", color:C.dim, padding:"48px 0" }}><div style={{ fontSize:22, marginBottom:8 }}>○</div><div>No circuits match this filter</div></div>
-            )}
-          </div>
-        )}
-
-        {/* JOURNAL / PATTERNS */}
-        {screen==="journal" && activeStore && (
-          <div style={{ padding:14, maxWidth:780, margin:"0 auto" }}>
-            <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:14 }}>
-              <button onClick={()=>setScreen("store")} style={{ background:C.steel, border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:8, padding:"6px 13px", cursor:"pointer", fontFamily:F, fontSize:12, letterSpacing:.5 }}>← Circuits</button>
-              <div style={{ fontFamily:F, fontWeight:600, fontSize:17, color:C.frost, letterSpacing:.5 }}>{activeStore.name} · Log</div>
-            </div>
-
-            <div style={{ display:"flex", gap:7, marginBottom:14 }}>
-              {[["journal","📓 Journal"],["patterns","🔍 Patterns"],["unresolved","⚠ Unresolved"]].map(([tab,label])=>(
-                <button key={tab} onClick={()=>setJournalTab(tab)} className={journalTab===tab?"cw-metal":""} style={{ flex:1, background:journalTab===tab?undefined:C.deep, border:`1px solid ${journalTab===tab?C.ice:C.line}`, color:journalTab===tab?C.ice:C.dim, borderRadius:9, padding:"9px 0", cursor:"pointer", fontFamily:F, fontWeight:600, fontSize:12.5, letterSpacing:.5 }}>{label}</button>
-              ))}
-            </div>
-
-            {journalTab==="journal" && (
-              <div>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
-                  <div style={{ color:C.dim, fontSize:12 }}>{storeCNotes.length} entries · most recent first</div>
-                  <button onClick={()=>openNoteModal("","General Note")} style={{ background:C.ice+"1A", border:`1px solid ${C.ice}55`, color:C.ice, borderRadius:8, padding:"6px 13px", cursor:"pointer", fontFamily:F, fontWeight:600, fontSize:12, letterSpacing:.5 }}>+ New Note</button>
-                </div>
-                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:12 }}>
-                  {NOTE_TYPES.map(nt=>{
-                    const count = storeCNotes.filter(n=>n.type===nt.id).length;
-                    if (count===0) return null;
-                    return <span key={nt.id} style={{ background:nt.color+"1A", border:`1px solid ${nt.color}55`, color:nt.color, borderRadius:5, padding:"2px 9px", fontSize:11, fontWeight:700, fontFamily:F }}>{nt.icon} {count}</span>;
-                  })}
-                </div>
-                {storeCNotes.length===0
-                  ? <div style={{ textAlign:"center", color:C.dim, padding:"40px 0" }}><div style={{ fontSize:22, marginBottom:8 }}>📓</div><div>No notes yet. Add your first entry above.</div></div>
-                  : storeCNotes.map(note=><JournalEntry key={note.id} note={note}/>)
-                }
-              </div>
-            )}
-
-            {journalTab==="patterns" && (
-              <div>
-                {storePatterns.length===0 ? (
-                  <div style={{ textAlign:"center", color:C.dim, padding:"40px 0" }}><div style={{ fontSize:22, marginBottom:8 }}>🔍</div><div>No system patterns detected yet.</div><div style={{ fontSize:12, marginTop:6 }}>Patterns emerge as you log more notes and issues.</div></div>
-                ) : storePatterns.map((p,i)=><PatternCard key={i} p={p}/>)}
-                <div className="cw-metal" style={{ border:`1px solid ${C.line}`, borderRadius:12, padding:15, marginTop:16 }}>
-                  <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:C.aluminum, marginBottom:11, letterSpacing:1 }}>WHAT CRYOWATCH LOOKS FOR</div>
-                  {[
-                    ["💧","Humidity Clusters","2+ circuits with humidity flags in the same store → possible ambient or store HVAC issue"],
-                    ["❄","Defrost Failures","3+ circuits with defrost anomalies → check rack defrost schedule, shared heater circuits, AK outputs"],
-                    ["⚙","Rack-Level Issues","Rack notes trigger an immediate review of all circuits on that system"],
-                    ["🌡","Ambient Temp","High store temp can cascade silently to medium-temp cases before alarms trigger"],
-                    ["📋","Resolved w/o Notes","Any issue moved to Resolved with no corresponding tech note is flagged — someone must account for what was done"],
-                  ].map(([icon,title,desc])=>(
-                    <div key={title} style={{ marginBottom:11, display:"flex", gap:11 }}>
-                      <span style={{ fontSize:16, flexShrink:0 }}>{icon}</span>
-                      <div>
-                        <div style={{ fontFamily:F, fontWeight:600, fontSize:13.5, color:C.frost, letterSpacing:.5 }}>{title}</div>
-                        <div style={{ fontSize:12, color:C.dim, lineHeight:1.45 }}>{desc}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {journalTab==="unresolved" && (
-              <div>
-                {resolvedNoNotes.length>0 && (
-                  <div style={{ background:C.ice+"12", border:`1px solid ${C.ice}44`, borderRadius:12, padding:15, marginBottom:16 }}>
-                    <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:C.ice, marginBottom:9, letterSpacing:.5 }}>📋 RESOLVED WITHOUT A TECH NOTE</div>
-                    {resolvedNoNotes.map(r=>(
-                      <div key={r.id} style={{ marginBottom:10, background:C.steel, borderRadius:9, padding:"9px 12px" }}>
-                        <div style={{ fontFamily:F, fontSize:14, color:C.frost, letterSpacing:.5 }}>{r.circuit}</div>
-                        <div style={{ fontSize:12, color:C.dim, marginTop:2 }}>Logged {r.createdAt} · Resolved with no corresponding emergency or PM note</div>
-                        <button onClick={()=>openNoteModal(r.circuit?.split(" ")[0]||"",r.circuit||"")} style={{ marginTop:7, background:C.ice+"1A", border:`1px solid ${C.ice}55`, color:C.ice, borderRadius:7, padding:"4px 11px", cursor:"pointer", fontFamily:F, fontSize:11 }}>+ Add Note</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{ fontFamily:F, fontWeight:600, fontSize:13, color:C.aluminum, marginBottom:11, letterSpacing:1 }}>OPEN ISSUES — {activeStore.name}</div>
-                {issues.filter(i=>i.storeId===activeStore.id&&i.urgency!=="Resolved").sort((a,b)=>b.riskScore-a.riskScore).map(issue=><IssueRow key={issue.id} issue={issue}/>)}
-                {issues.filter(i=>i.storeId===activeStore.id&&i.urgency!=="Resolved").length===0&&(
-                  <div style={{ textAlign:"center", color:C.dim, padding:"30px 0" }}>✓ No open issues</div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* NOTE MODAL */}
-      {noteModal && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(3,10,16,.85)", display:"flex", alignItems:"flex-end", justifyContent:"center", zIndex:600, backdropFilter:"blur(3px)" }}>
-          <div className="cw-metal" style={{ border:`1px solid ${C.line}`, borderRadius:"18px 18px 0 0", padding:22, width:"100%", maxWidth:560, maxHeight:"88vh", overflowY:"auto" }}>
-            <div style={{ fontFamily:F, fontWeight:600, fontSize:18, letterSpacing:1, marginBottom:4, color:C.frost }}>LOG NOTE</div>
-            <div style={{ color:C.dim, fontSize:12, marginBottom:16 }}>{noteModal.circuitId} — {noteModal.circuitName}</div>
-            <label style={lbl}>Note Type</label>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:14 }}>
-              {NOTE_TYPES.map(nt=>(
-                <button key={nt.id} onClick={()=>setNoteForm(f=>({...f,type:nt.id}))} style={{ background:noteForm.type===nt.id?nt.color+"22":"transparent", border:`1px solid ${noteForm.type===nt.id?nt.color:C.line}`, color:noteForm.type===nt.id?nt.color:C.dim, borderRadius:6, padding:"5px 11px", fontSize:12, cursor:"pointer", fontFamily:F, fontWeight:600 }}>{nt.icon} {nt.label}</button>
-              ))}
-            </div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, marginBottom:12 }}>
-              <div><label style={lbl}>Date</label><input type="date" value={noteForm.date} onChange={e=>setNoteForm(f=>({...f,date:e.target.value}))} style={inp}/></div>
-              <div><label style={lbl}>Time</label><input type="time" value={noteForm.time} onChange={e=>setNoteForm(f=>({...f,time:e.target.value}))} style={inp}/></div>
-              <div><label style={lbl}>Shift</label><select value={noteForm.shift} onChange={e=>setNoteForm(f=>({...f,shift:e.target.value}))} style={sel}><option>AM</option><option>PM</option><option>EVE</option></select></div>
-            </div>
-            <div style={{ marginBottom:12 }}><label style={lbl}>Tech / Initials</label><input value={noteForm.tech||""} onChange={e=>setNoteForm(f=>({...f,tech:e.target.value}))} placeholder="e.g. JRS, Auto-AI…" style={inp}/></div>
-            <div style={{ marginBottom:18 }}><label style={lbl}>Note</label><textarea rows={5} value={noteForm.text||""} onChange={e=>setNoteForm(f=>({...f,text:e.target.value}))} placeholder="What was found, what was done, parts ordered, patterns observed, temps at time of visit…" style={{...inp,resize:"vertical"}}/></div>
-            <div style={{ fontSize:11.5, color:C.dim, marginBottom:16, lineHeight:1.5 }}>
-              <strong style={{ color:C.orange }}>Tip:</strong> If a case was running bad but is now OK, note what you found and what fixed it. CryoWatch flags resolved issues with no tech note so nothing slips through.
-            </div>
-            <div style={{ display:"flex", gap:10 }}>
-              <button onClick={()=>setNoteModal(null)} style={{ flex:1, background:C.steel, border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:8, padding:"10px 0", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5 }}>Cancel</button>
-              <button onClick={saveNote} style={{ flex:2, background:`linear-gradient(135deg, ${C.glacier}, ${C.deepIce})`, border:`1px solid ${C.ice}66`, color:"#fff", borderRadius:8, padding:"10px 0", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5 }}>Save Note</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ISSUE FORM MODAL */}
-      {showIssueForm && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(3,10,16,.85)", display:"flex", alignItems:"flex-end", justifyContent:"center", zIndex:500, backdropFilter:"blur(3px)" }}>
-          <div className="cw-metal" style={{ border:`1px solid ${C.line}`, borderRadius:"18px 18px 0 0", padding:22, width:"100%", maxWidth:560, maxHeight:"85vh", overflowY:"auto" }}>
-            <div style={{ fontFamily:F, fontWeight:600, fontSize:18, letterSpacing:1, marginBottom:18, color:C.frost }}>{editingIssueId?"EDIT ISSUE":"LOG NEW ISSUE"}</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
-              <div><label style={lbl}>Store</label><select value={issueForm.storeId} onChange={e=>setIssueForm(f=>({...f,storeId:Number(e.target.value)}))} style={sel}>{stores.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
-              <div><label style={lbl}>Type</label><select value={issueForm.type} onChange={e=>setIssueForm(f=>({...f,type:e.target.value}))} style={sel}>{["Alarm","Trending","Defrost","Compressor"].map(t=><option key={t}>{t}</option>)}</select></div>
-              <div><label style={lbl}>Urgency</label><select value={issueForm.urgency} onChange={e=>setIssueForm(f=>({...f,urgency:e.target.value}))} style={sel}>{["Today","This Week","Watch List","Resolved"].map(u=><option key={u}>{u}</option>)}</select></div>
-              <div><label style={lbl}>Risk (1–10)</label><select value={issueForm.riskScore} onChange={e=>setIssueForm(f=>({...f,riskScore:Number(e.target.value)}))} style={sel}>{[1,2,3,4,5,6,7,8,9,10].map(n=><option key={n}>{n}</option>)}</select></div>
-            </div>
-            <div style={{ marginBottom:12 }}><label style={lbl}>Circuit / Equipment</label><input value={issueForm.circuit||""} onChange={e=>setIssueForm(f=>({...f,circuit:e.target.value}))} placeholder="e.g. 2G DFBX 1-9" style={inp}/></div>
-            <div style={{ marginBottom:12 }}><label style={lbl}>Description</label><textarea rows={3} value={issueForm.description||""} onChange={e=>setIssueForm(f=>({...f,description:e.target.value}))} placeholder="Specific values, patterns, what was flagged…" style={{...inp,resize:"vertical"}}/></div>
-            <div style={{ marginBottom:20 }}><label style={lbl}>Notes</label><textarea rows={2} value={issueForm.notes||""} onChange={e=>setIssueForm(f=>({...f,notes:e.target.value}))} placeholder="Actions taken, parts ordered…" style={{...inp,resize:"vertical"}}/></div>
-            <div style={{ display:"flex", gap:10 }}>
-              <button onClick={()=>setShowIssueForm(false)} style={{ flex:1, background:C.steel, border:`1px solid ${C.line}`, color:C.aluminum, borderRadius:8, padding:"10px 0", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5 }}>Cancel</button>
-              <button onClick={saveIssue} style={{ flex:2, background:`linear-gradient(135deg, ${C.glacier}, ${C.deepIce})`, border:`1px solid ${C.ice}66`, color:"#fff", borderRadius:8, padding:"10px 0", cursor:"pointer", fontWeight:600, fontFamily:F, letterSpacing:.5 }}>{editingIssueId?"Save Changes":"Log Issue"}</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
